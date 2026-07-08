@@ -11,7 +11,10 @@
 #include <stdint.h>
 
 /* One drawable submesh: interleaved [px,py,pz,u,v] verts + u16 triangle list. */
-enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2 };
+enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2,
+       /* car mesh classes, from material name */
+       N2_CAR_BODY = 10, N2_CAR_GLASS = 11, N2_CAR_LIGHT = 12,
+       N2_CAR_TIRE = 13, N2_CAR_MISC = 14 };
 typedef struct {
     float   *verts;   /* 5 floats per vertex: pos.xyz, uv */
     int      nverts;
@@ -182,15 +185,56 @@ static int n2_load_scene(const unsigned char *d, long len, N2Scene *scene) {
     return scene->count;
 }
 
-/* Parse a car GEOMETRY.BIN (36-byte verts w/ normals) in its local space. */
+/* Classify a car 0x80134010 mesh by its material name (part name). */
+static int n2_car_category(const unsigned char *d, long beg, long end) {
+    N2Leaf mat[4]; int nm = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
+    for (int k = 0; k < nm; k++) {
+        const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        for (long i = 0; i + 5 < s; i++) {
+            if (p[i] >= 'A' && p[i] <= 'Z') {
+                long j = i;
+                while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
+                if (j - i >= 5) {
+                    const unsigned char *n = p + i; long L = j - i;
+                    if (n2_contains(n,L,"WINDOW") || n2_contains(n,L,"GLASS")) return N2_CAR_GLASS;
+                    if (n2_contains(n,L,"LIGHT") || n2_contains(n,L,"LAMP"))   return N2_CAR_LIGHT;
+                    if (n2_contains(n,L,"TIRE") || n2_contains(n,L,"WHEEL"))   return N2_CAR_TIRE;
+                    if (n2_contains(n,L,"BASE") || n2_contains(n,L,"BODY") ||
+                        n2_contains(n,L,"KIT")  || n2_contains(n,L,"STYLE"))   return N2_CAR_BODY;
+                    return N2_CAR_MISC;
+                }
+                i = j;
+            }
+        }
+    }
+    return N2_CAR_MISC;
+}
+
+/* Parse a car GEOMETRY.BIN (36-byte verts w/ normals), tagging each mesh with
+ * a class from its material name (body/glass/light/tire/misc). */
+static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *scene) {
+    long o = beg;
+    while (o + 8 <= end) {
+        uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
+        long ds = o + 8;
+        if (m == 0x80134010u) {
+            int cat = n2_car_category(d, ds, ds + s);
+            N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
+            n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
+            n2_find_leaves(d, ds, ds + s, 0x00134B03u, idx, &ni, 64);
+            int pairs = nv < ni ? nv : ni;
+            for (int k = 0; k < pairs; k++)
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0);
+        } else if (m != 0 && (m >> 28) == 8) {
+            n2_walk_car(d, ds, ds + s, scene);
+        }
+        o = ds + s;
+    }
+}
 static int n2_load_car(const unsigned char *d, long len, N2Scene *scene) {
     memset(scene, 0, sizeof(*scene));
-    N2Leaf vtx[512], idx[512]; int nv = 0, ni = 0;
-    n2_find_leaves(d, 0, len, 0x00134B01u, vtx, &nv, 512);
-    n2_find_leaves(d, 0, len, 0x00134B03u, idx, &ni, 512);
-    int pairs = nv < ni ? nv : ni;
-    for (int k = 0; k < pairs; k++)
-        n2_add_pair(d, vtx[k], idx[k], N2_OTHER, scene, 36, 28, 0);
+    n2_walk_car(d, 0, len, scene);
     return scene->count;
 }
 

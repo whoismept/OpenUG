@@ -436,12 +436,21 @@ int main(int argc, char **argv) {
             mat_mul(T, Rz, Model);
             mat_mul(MVP, Model, MVPc);
             glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVPc);
-            if (texCar) {          /* player car: real body texture */
-                glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, texCar);
-            } else {
-                glUniform1f(uUseTex, 0.0f); glUniform3f(uColor, 0.85f, 0.12f, 0.12f);
+            /* per-mesh: body wears the decoded texture; other parts get a
+               sensible flat colour by class (glass/light/tyre/misc). */
+            for (int i = 0; i < ncar; i++) {
+                int c = cgm[i].cat;
+                if (texCar && (c == N2_CAR_BODY || c == N2_CAR_MISC)) {
+                    glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, texCar);
+                } else {
+                    glUniform1f(uUseTex, 0.0f);
+                    if      (c == N2_CAR_GLASS) glUniform3f(uColor, 0.08f, 0.10f, 0.14f);
+                    else if (c == N2_CAR_LIGHT) glUniform3f(uColor, 0.95f, 0.85f, 0.55f);
+                    else if (c == N2_CAR_TIRE)  glUniform3f(uColor, 0.06f, 0.06f, 0.07f);
+                    else                        glUniform3f(uColor, 0.85f, 0.12f, 0.12f);
+                }
+                draw_gpumesh(&cgm[i]);
             }
-            for (int i = 0; i < ncar; i++) draw_gpumesh(&cgm[i]);
             glUniform1f(uUseTex, 0.0f);   /* AIs stay flat colour */
             /* AI opponents — same body, each in its own colour */
             for (int k = 0; k < nai; k++) {
