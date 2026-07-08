@@ -26,8 +26,8 @@ Early but real — the full asset→render→drive pipeline works end to end:
   and its body texture (`TEXTURES.BIN`: JDLZ-decompressed + DXT1/DXT3).
 - **Driving** — arcade car physics, ground-height follow, chase camera.
 - **Racing** — AI opponents follow the game's own racing line
-  (`ROUTES*/Paths*.bin`), lap counting on a closed circuit, and a font-free
-  race-position HUD.
+  (`ROUTES*/Paths*.bin`); a 3-2-1 countdown start, lap counting on a closed
+  circuit, finish + placing, and a font-free race-position HUD.
 
 See [`docs/FORMATS.md`](docs/FORMATS.md) for the reverse-engineered file formats.
 
