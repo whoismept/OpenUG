@@ -1,0 +1,41 @@
+# --- Original game data (NEVER commit — copyrighted EA assets) ---
+CARS/
+TRACKS/
+GLOBAL/
+FRONTEND/
+SOUND/
+SUBTITLES/
+NIS/
+CREDITS/
+LANGUAGES/
+memcard/
+*.BUN
+*.BIN
+*.bin
+*.bun
+*.exe
+*.dll
+*.viv
+server.cfg
+SafeMode.bat
+
+# --- Build output ---
+nfsu2
+*.o
+*.obj
+*.exe
+
+# --- Screenshots / generated ---
+*.png
+mesh_out.*
+
+# --- Reverse-engineering scratch (Ghidra projects, clones) ---
+ghidra/
+*.gpr
+*.rep/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
