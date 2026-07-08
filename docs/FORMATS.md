@@ -98,6 +98,20 @@ above were recovered from the *data* files, not the exe.
 
 ## Credits / references
 
-The car TPK layout and the NFSU2 texture header were cross-checked against the
-open-source **Nikki** library and the JDLZ algorithm against **OpenNFSTools** —
-used only as format references; all code here is an independent implementation.
+These format notes stand on the shoulders of prior community reverse-engineering.
+Used only as references to understand the formats — all code here is an
+independent implementation.
+
+- **yugecin — [`nfsu2-re`](https://github.com/yugecin/nfsu2-re)**
+  ([docs](https://yugecin.github.io/nfsu2-re/docs.html),
+  [functions](https://yugecin.github.io/nfsu2-re/funcs.html),
+  [structs](https://yugecin.github.io/nfsu2-re/structs.html),
+  [enums](https://yugecin.github.io/nfsu2-re/enums.html),
+  [vars](https://yugecin.github.io/nfsu2-re/vars.html)) — an excellent, detailed
+  reverse-engineering project of NFSU2. The chunk-container structure (the
+  8-byte `magic`+`size` header and the `0x8`-nibble nesting rule) was confirmed
+  against yugecin's documentation. Huge thanks — great work.
+- **[Nikki](https://github.com/MaxHwoy/Nikki)** — NFS modding library; reference
+  for the TPK layout and the NFSU2 texture header struct.
+- **[OpenNFSTools](https://github.com/MWisBest/OpenNFSTools)** — reference for
+  the JDLZ decompression algorithm.

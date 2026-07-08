@@ -74,6 +74,20 @@ Reverse-engineering notes live in `docs/FORMATS.md`; the `tools/` scripts are
 handy for poking at the data. Good next steps: per-mesh car material binding,
 more tracks/cars, collision, a race start/finish flow, audio.
 
+## Credits
+
+Format reverse-engineering builds on prior community work, used as references
+(all code here is independent):
+
+- **[yugecin/nfsu2-re](https://github.com/yugecin/nfsu2-re)** — a superb, detailed
+  NFSU2 reverse-engineering project; the chunk-container format was confirmed
+  against its [documentation](https://yugecin.github.io/nfsu2-re/docs.html).
+  Big thanks for the great work.
+- **[Nikki](https://github.com/MaxHwoy/Nikki)** — TPK / texture header reference.
+- **[OpenNFSTools](https://github.com/MWisBest/OpenNFSTools)** — JDLZ algorithm reference.
+
+See [`docs/FORMATS.md`](docs/FORMATS.md) for details.
+
 ## Legal
 
 Unofficial and not affiliated with Electronic Arts. Ships engine code only, no

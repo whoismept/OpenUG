@@ -326,6 +326,9 @@ int main(int argc, char **argv) {
     float heading = heading0, speed = 0.0f, cam[3] = { spawn[0], spawn[1], spawn[2]+5 };
     int p_lap = 0, p_prev = 0;   /* player lap + previous loop-progress */
     const float ACCEL=0.3f, MAXSPD=4.5f, FRICTION=0.95f, TURN=0.04f;
+    /* race flow: 0 = countdown, 1 = racing, 2 = finished */
+    const int COUNTDOWN = 180, LAP_TARGET = 2;
+    int race_state = shot ? 1 : 0, racetimer = 0, finish_place = 0;
     int running = 1, shotframe = 0;
     while (running) {
         SDL_Event e;
@@ -333,10 +336,12 @@ int main(int argc, char **argv) {
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) running = 0;
         }
-        /* W/S throttle, A/D steer (steering scales with speed) */
+        /* W/S throttle, A/D steer (only once racing) */
         const Uint8 *ks = SDL_GetKeyboardState(NULL);
-        if (ks[SDL_SCANCODE_W] || shot) speed += ACCEL;   /* shot mode auto-drives */
-        if (ks[SDL_SCANCODE_S]) speed -= ACCEL;
+        if (race_state == 1) {
+            if (ks[SDL_SCANCODE_W] || shot) speed += ACCEL;   /* shot mode auto-drives */
+            if (ks[SDL_SCANCODE_S]) speed -= ACCEL;
+        }
         speed *= FRICTION;
         if (speed >  MAXSPD) speed =  MAXSPD;
         if (speed < -MAXSPD*0.4f) speed = -MAXSPD*0.4f;
@@ -357,7 +362,7 @@ int main(int argc, char **argv) {
         carpos[2] += (gz - carpos[2]) * 0.35f;
 
         /* AI opponents: each steers toward its next racing-line waypoint */
-        for (int k = 0; k < nai; k++) {
+        for (int k = 0; race_state == 1 && k < nai; k++) {
             AiCar *ai = &ais[k];
             float ax=aipath.xy[ai->t*2]-ai->pos[0], ay=aipath.xy[ai->t*2+1]-ai->pos[1];
             if (ax*ax+ay*ay < 36.0f) ai->t = (ai->t+1) % aipath.n;
@@ -377,11 +382,22 @@ int main(int argc, char **argv) {
             if (ai->prevrel > aipath.n*3/4 && rel < aipath.n/4) ai->lap++;
             ai->prevrel = rel;
         }
-        if (aipath.n > 1) {   /* same lap logic for the player */
+        if (race_state == 1 && aipath.n > 1) {   /* same lap logic for the player */
             int prel = (n2_nearest_wp(&aipath, carpos[0], carpos[1]) - start_idx
                         + aipath.n) % aipath.n;
             if (p_prev > aipath.n*3/4 && prel < aipath.n/4) p_lap++;
             p_prev = prel;
+        }
+
+        /* race state machine: countdown -> racing -> finished */
+        racetimer++;
+        if (race_state == 0 && racetimer >= COUNTDOWN) { race_state = 1; racetimer = 0; }
+        if (race_state == 1 && p_lap >= LAP_TARGET) {
+            int ahead = 0, pp = p_lap*aipath.n + p_prev;
+            for (int k = 0; k < nai; k++)
+                if (ais[k].lap*aipath.n + ais[k].prevrel > pp) ahead++;
+            finish_place = ahead + 1;
+            race_state = 2;
         }
 
         /* chase camera: trail behind + above, look at the car */
@@ -483,6 +499,34 @@ int main(int argc, char **argv) {
             }
             glEnable(GL_DEPTH_TEST);
         }
+
+        /* race banners: 3-2-1 countdown, then a finish banner + place pips */
+        glDisable(GL_DEPTH_TEST);
+        glUniform1f(uUnlit, 1.0f); glUniform1f(uUseTex, 0.0f);
+        if (race_state == 0) {
+            int n = 3 - racetimer/60;
+            for (int i = 0; i < n; i++) {
+                float M[16]={0.06f,0,0,0, 0,0.15f,0,0, 0,0,1,0, -0.11f+i*0.09f,0.32f,0,1};
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
+                glUniform3f(uColor,0.9f,0.2f,0.15f); draw_gpumesh(&quad);
+            }
+            if (racetimer > COUNTDOWN-18) {   /* GO! */
+                float M[16]={0.5f,0,0,0, 0,0.15f,0,0, 0,0,1,0, -0.25f,0.32f,0,1};
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
+                glUniform3f(uColor,0.2f,0.9f,0.3f); draw_gpumesh(&quad);
+            }
+        } else if (race_state == 2) {         /* finished */
+            float M[16]={1.7f,0,0,0, 0,0.13f,0,0, 0,0,1,0, -0.85f,0.38f,0,1};
+            glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
+            glUniform3f(uColor,0.95f,0.8f,0.2f); draw_gpumesh(&quad);
+            for (int i = 0; i < finish_place; i++) {   /* finishing place */
+                float PM[16]={0.05f,0,0,0, 0,0.08f,0,0, 0,0,1,0, -0.08f+i*0.065f,0.4f,0,1};
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,PM);
+                glUniform3f(uColor,0.12f,0.12f,0.16f); draw_gpumesh(&quad);
+            }
+        }
+        glEnable(GL_DEPTH_TEST);
+
         if (shot && ++shotframe >= 40) {
             unsigned char *px = malloc((size_t)W*H*3), *fl = malloc((size_t)W*H*3);
             glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px);
