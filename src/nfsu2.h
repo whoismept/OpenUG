@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 /* One drawable submesh: interleaved [px,py,pz,u,v] verts + u16 triangle list. */
-enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2,
+enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2, N2_SKY = 3,
        /* car mesh classes, from material name */
        N2_CAR_BODY = 10, N2_CAR_GLASS = 11, N2_CAR_LIGHT = 12,
        N2_CAR_TIRE = 13, N2_CAR_MISC = 14 };
@@ -99,6 +99,7 @@ static int n2_mesh_category(const unsigned char *d, long beg, long end) {
                 while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
                 if (j - i >= 5) {
                     const unsigned char *n = p + i; long L = j - i;
+                    if (n2_contains(n, L, "SKYDOME") || n2_contains(n, L, "SKY")) return N2_SKY;
                     if (n2_contains(n, L, "ROAD")) return N2_ROAD;
                     if (n2_contains(n, L, "TERRAIN")) return N2_TERRAIN;
                     return N2_OTHER;
@@ -132,7 +133,9 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
             }
         float span = 0;
         for (int c = 0; c < 3; c++) if (mx[c]-mn[c] > span) span = mx[c]-mn[c];
-        if (span >= 2000.0f) return;
+        /* the skybox is dropped by material name now; keep only an absurd-span
+           safety so big city ground/buildings (thousands of units) still draw. */
+        if (span >= 60000.0f) return;
     }
 
     N2Mesh m; memset(&m, 0, sizeof(m));
@@ -158,29 +161,41 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
     n2_push_mesh(scene, m);
 }
 
-/* Track meshes: the diffuse is the LAST non-zero key in the 0x134012 slot list
- * (road/terrain/prop/sky all fit this); resolving it to a texture happens at
- * bind time, so a missing/garbage texture cleanly falls back (not to grass). */
-static uint32_t n2_mesh_last_texkey(const unsigned char *d, long beg, long end) {
+/* Pick a track mesh's diffuse key from its 0x134012 slot list. Road/terrain use
+ * the LAST slot (their own surface texture; missing -> asphalt/grass fallback,
+ * never an earlier grass base slot). Props/buildings prefer the last slot that
+ * actually RESOLVES (is in `keys`) — a building often lists a detail slot last
+ * that lives in an unshipped pack, with the real facade in an earlier slot. */
+static uint32_t n2_mesh_texkey_cat(const unsigned char *d, long beg, long end,
+                               int cat, const uint32_t *keys, int nkeys) {
     N2Leaf t12[4]; int n12 = 0;
     n2_find_leaves(d, beg, end, 0x00134012u, t12, &n12, 4);
-    uint32_t last = 0;
+    uint32_t last = 0, lastres = 0;
     for (int a = 0; a < n12; a++) {
         const unsigned char *p = d + t12[a].off; long ls = t12[a].size;
-        for (long b = 0; b + 4 <= ls; b += 4) { uint32_t v = n2_u32(p + b); if (v) last = v; }
+        for (long b = 0; b + 4 <= ls; b += 4) {
+            uint32_t v = n2_u32(p + b); if (!v) continue;
+            last = v;
+            for (int c = 0; c < nkeys; c++) if (keys[c] == v) { lastres = v; break; }
+        }
     }
-    return last;
+    if (cat == N2_ROAD || cat == N2_TERRAIN) return last;
+    return lastres ? lastres : last;
 }
 
-/* Walk to every 0x80134010 mesh, classify it, extract its vtx/idx pairs. */
-static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *scene) {
+/* Walk to every 0x80134010 mesh, classify it, extract its vtx/idx pairs. `keys`
+ * is the set of texture keys resolvable for this region (local TPK + shared
+ * pack), used to pick each mesh's diffuse slot. */
+static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *scene,
+                           const uint32_t *keys, int nkeys) {
     long o = beg;
     while (o + 8 <= end) {
         uint32_t magic = n2_u32(d + o), size = n2_u32(d + o + 4);
         long ds = o + 8;
         if (magic == 0x80134010u) {
             int cat = n2_mesh_category(d, ds, ds + size);
-            uint32_t tk = n2_mesh_last_texkey(d, ds, ds + size);
+            if (cat == N2_SKY) { o = ds + size; continue; }   /* drop the skybox by name */
+            uint32_t tk = n2_mesh_texkey_cat(d, ds, ds + size, cat, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + size, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + size, 0x00134B03u, idx, &ni, 64);
@@ -188,16 +203,17 @@ static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *
             for (int k = 0; k < pairs; k++)
                 n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1, tk);
         } else if (magic != 0 && (magic >> 28) == 8) {
-            n2_walk_meshes(d, ds, ds + size, scene);
+            n2_walk_meshes(d, ds, ds + size, scene, keys, nkeys);
         }
         o = ds + size;
     }
 }
 
 /* Parse a STREAM .BUN into categorized world-space meshes. Returns mesh count. */
-static int n2_load_scene(const unsigned char *d, long len, N2Scene *scene) {
+static int n2_load_scene(const unsigned char *d, long len, N2Scene *scene,
+                         const uint32_t *keys, int nkeys) {
     memset(scene, 0, sizeof(*scene));
-    n2_walk_meshes(d, 0, len, scene);
+    n2_walk_meshes(d, 0, len, scene, keys, nkeys);
     return scene->count;
 }
 
@@ -553,34 +569,73 @@ static int n2_tex_noise(const N2Tex *t) {
     return cnt && (sum / (cnt*3)) > 55;
 }
 
-/* Decode a STREAM local-TPK texture by its 0x7c-record hash (@+0x18). Pixels
- * live in the 0x33320002 sub-chunk; DXT1 vs DXT3 is inferred from the stored
- * size (DXT3 base = W*H, DXT1 = W*H/2). Returns 1 on a decoded hit. */
-static int n2_load_stream_tex_by_hash(const unsigned char *d, long len, uint32_t hash, N2Tex *t) {
-    long hdr = -1;
-    for (long i = 0; i + 4 < len; i++)
-        if (d[i]==0 && d[i+1]==0 && d[i+2]==0x31 && d[i+3]==0xb3) { hdr = i; break; }
-    if (hdr < 0) return 0;
-    long hbeg = hdr + 8, hsize = n2_u32(d + hdr + 4);
-    long pbase = -1;                       /* pixel data = payload of 0x33320002 */
-    for (long i = hdr; i + 8 < len; i++)
-        if (n2_u32(d + i) == 0x33320002u) { pbase = i + 8; break; }
-    if (pbase < 0)                          /* fallback: raw 0xb3320000 payload */
-        for (long i = hdr; i + 4 < len; i++)
-            if (d[i]==0 && d[i+1]==0 && d[i+2]==0x32 && d[i+3]==0xb3) { pbase = i + 8; break; }
-    if (pbase < 0) return 0;
-    for (long i = hbeg; i + 0x3c < hbeg + hsize; i++) {
-        if (!(d[i] >= 'A' && d[i] <= 'Z')) continue;      /* record name start */
-        if (n2_u32(d + i + 0x18) != hash) continue;
-        uint32_t off = n2_u32(d + i + 0x24), sz = n2_u32(d + i + 0x2c);
-        int w = d[i+0x38] | d[i+0x39]<<8, hh = d[i+0x3a] | d[i+0x3b]<<8;
-        if (w<=0 || hh<=0 || w>4096 || hh>4096) continue;
-        if (pbase + off + (long)w*hh/2 > len) continue;
-        int dxt3 = (long)sz > (long)w*hh*9/10;            /* dxt3 base=W*H, dxt1=W*H/2 */
-        t->w = w; t->h = hh; t->rgb = (unsigned char *)malloc((long)w*hh*3);
-        if (dxt3) n2_dxt3(d + pbase + off, w, hh, t->rgb);
-        else      n2_dxt1(d + pbase + off, w, hh, t->rgb);
-        return 1;
+/* A STREAM TPK opened once for repeated by-hash lookups. A region can have MANY
+ * 0xb3310000 header blocks (each paired with a following 0x33320002 pixel block);
+ * a single O(len) pass records them all, so a huge shared "master" region can be
+ * mmap'd and queried without re-scanning it per texture. */
+typedef struct { long hbeg, hsize, dbase; } N2TpkBlk;
+typedef struct { N2TpkBlk *blk; int nblk; } N2Tpk;
+static N2Tpk n2_tpk_open(const unsigned char *d, long len) {
+    N2Tpk t; t.blk = NULL; t.nblk = 0; int cap = 0;
+    long ph = -1; uint32_t phs = 0;
+    for (long i = 0; i + 8 < len; i++) {
+        if (d[i]==0 && d[i+1]==0 && d[i+2]==0x31 && d[i+3]==0xb3) {    /* header 0xb3310000 */
+            ph = i + 8; phs = n2_u32(d + i + 4);
+        } else if (ph >= 0 && d[i]==0x02 && d[i+1]==0x00 && d[i+2]==0x32 && d[i+3]==0x33) {
+            long pbase = i + 8, room = len - pbase;       /* pixels 0x33320002 */
+            if (room > 0x40000000) room = 0x40000000;
+            if (t.nblk == cap) { cap = cap ? cap*2 : 64;
+                t.blk = (N2TpkBlk *)realloc(t.blk, (size_t)cap*sizeof(N2TpkBlk)); }
+            t.blk[t.nblk].hbeg = ph; t.blk[t.nblk].hsize = phs;
+            t.blk[t.nblk].dbase = pbase + n2_skip_filler(d + pbase, (int)room);
+            t.nblk++; ph = -1;
+        }
+    }
+    return t;
+}
+/* Collect every record hash (@+0x18) across all blocks. Returns the count. */
+static int n2_tpk_keys(const unsigned char *d, N2Tpk t, uint32_t *keys, int maxk) {
+    int n = 0;
+    for (int b = 0; b < t.nblk && n < maxk; b++) {
+        long hbeg = t.blk[b].hbeg, hend = hbeg + t.blk[b].hsize;
+        for (long i = hbeg; i + 0x40 < hend && n < maxk; i++) {
+            if (!(d[i] >= 'A' && d[i] <= 'Z')) continue;
+            if (d[i+0x17] != 0) continue;                 /* 24-byte name null-terminated */
+            keys[n++] = n2_u32(d + i + 0x18);
+            i += 0x7b;                                    /* next 0x7c record */
+        }
+    }
+    return n;
+}
+
+/* Decode one texture by its record hash, searching all blocks. Fields (Nikki's
+ * layout minus a 0x0C name-pad prefix): +0x18 BinKey +0x24 Offset
+ * +0x28 PaletteOffset +0x2c Size +0x30 PaletteSize +0x38 W(u16) +0x3a H(u16).
+ * P8 when PaletteSize >= 1024 (256-entry RGBA); else DXT1/DXT3 by Size. */
+static int n2_tpk_decode(const unsigned char *d, long len, N2Tpk t, uint32_t hash, N2Tex *tex) {
+    for (int b = 0; b < t.nblk; b++) {
+        long hbeg = t.blk[b].hbeg, hend = hbeg + t.blk[b].hsize, dbase = t.blk[b].dbase;
+        for (long i = hbeg; i + 0x40 < hend; i++) {
+            if (!(d[i] >= 'A' && d[i] <= 'Z')) continue;
+            if (n2_u32(d + i + 0x18) != hash) continue;
+            uint32_t off = n2_u32(d + i + 0x24), paloff = n2_u32(d + i + 0x28);
+            uint32_t sz = n2_u32(d + i + 0x2c), palsz = n2_u32(d + i + 0x30);
+            int w = d[i+0x38] | d[i+0x39]<<8, hh = d[i+0x3a] | d[i+0x3b]<<8;
+            if (w<=0 || hh<=0 || w>4096 || hh>4096) continue;
+            tex->w = w; tex->h = hh; tex->rgb = (unsigned char *)malloc((long)w*hh*3);
+            if (palsz >= 1024 && dbase+paloff+1024 <= len && dbase+off+(long)w*hh <= len) {
+                const unsigned char *pal = d + dbase + paloff, *ix = d + dbase + off;
+                for (long p = 0; p < (long)w*hh; p++) {   /* P8: index -> RGBA palette */
+                    const unsigned char *c = pal + (long)ix[p]*4;
+                    tex->rgb[p*3]=c[0]; tex->rgb[p*3+1]=c[1]; tex->rgb[p*3+2]=c[2];
+                }
+            } else if (dbase + off + (long)w*hh/2 <= len) {
+                int dxt3 = (long)sz > (long)w*hh*9/10;
+                if (dxt3) n2_dxt3(d + dbase + off, w, hh, tex->rgb);
+                else      n2_dxt1(d + dbase + off, w, hh, tex->rgb);
+            } else { free(tex->rgb); continue; }
+            return 1;
+        }
     }
     return 0;
 }

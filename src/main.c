@@ -10,8 +10,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <assert.h>
 #include <dirent.h>
 #include <unistd.h>   /* execvp: menu track-switch re-launches the process */
+#include <fcntl.h>
+#include <sys/mman.h>  /* mmap the shared "master" region (lazy paging, no 100MB read) */
+#include <sys/stat.h>
 #include <SDL.h>
 #include <zlib.h>   /* screenshot PNG (dev only; desktop build) */
 
@@ -46,9 +50,9 @@ static const char *FS =
     "    if(uSoft>0.5){ float d=length(vUV-vec2(0.5)); a*=clamp(1.0-d*2.0,0.0,1.0); a*=a; }\n"
     "    gl_FragColor=vec4(uColor,a); return; }\n"
     "  vec3 L=normalize(vec3(0.4,0.7,0.6));\n"
-    "  float d=0.55+0.45*abs(dot(normalize(vN),L));\n"
+    "  float d=0.75+0.4*abs(dot(normalize(vN),L));\n"
     "  vec3 base = uUseTex>0.5 ? texture2D(uTex,vUV).rgb : uColor;\n"
-    "  gl_FragColor=vec4(base*d,1.0);\n"
+    "  gl_FragColor=vec4(base*d*1.35,1.0);\n"  // lift the dark night textures so the city reads
     "}\n";
 
 /* ---- tiny 4x4 matrix (column-major) ---- */
@@ -222,7 +226,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
    so it is safe to call repeatedly (e.g. when the menu switches circuit). */
 static int load_circuit(const char *dataroot, const char *circuit, N2Scene *scene,
                         N2Path *aipath, AiCar *ais, float spawn[3],
-                        float *heading0, int *start_idx) {
+                        float *heading0, int *start_idx, float cx, float cy) {
     static const float AICOL[N_AI][3] = {
         {0.15f,0.4f,0.95f}, {0.2f,0.8f,0.35f}, {0.95f,0.8f,0.15f}, {0.85f,0.2f,0.8f} };
     free(aipath->xy); aipath->xy = NULL; aipath->n = 0;
@@ -233,11 +237,25 @@ static int load_circuit(const char *dataroot, const char *circuit, N2Scene *scen
     int ok = n2_load_path(pdata, plen, aipath) > 4;
     free(pdata);
     if (!ok) { free(aipath->xy); aipath->xy = NULL; aipath->n = 0; return 0; }
-    *start_idx = 0;
-    spawn[0]=aipath->xy[0]; spawn[1]=aipath->xy[1];
-    spawn[2]=n2_ground_z(scene, spawn[0], spawn[1], spawn[2]);
-    int nx = 1 % aipath->n;
-    *heading0 = atan2f(aipath->xy[nx*2+1]-spawn[1], aipath->xy[nx*2]-spawn[0]);
+    /* Spawn the PLAYER at the densest built-up spot (cx,cy passed in) so the
+       opening view frames the city — even if that's off the racing line (the
+       lap logic tracks the nearest waypoint, so the race still works). The AI
+       grid on the line, nearest that spot. */
+    int best = 0; float bestd = 1e30f;
+    for (int i = 0; i < aipath->n; i++) {
+        float dx = aipath->xy[i*2]-cx, dy = aipath->xy[i*2+1]-cy, dd = dx*dx+dy*dy;
+        if (dd < bestd) { bestd = dd; best = i; }
+    }
+    *start_idx = best;
+    spawn[0]=cx; spawn[1]=cy;
+    spawn[2]=n2_ground_z(scene, cx, cy, spawn[2]);
+    float dwx = aipath->xy[best*2]-cx, dwy = aipath->xy[best*2+1]-cy;
+    if (dwx*dwx+dwy*dwy < 9.0f) {                 /* already on the line: face along it */
+        int nx = (best+1) % aipath->n;
+        *heading0 = atan2f(aipath->xy[nx*2+1]-cy, aipath->xy[nx*2]-cx);
+    } else {                                       /* face toward the racing line */
+        *heading0 = atan2f(dwy, dwx);
+    }
     for (int k = 0; k < N_AI; k++) {
         int t = (*start_idx + 2 + k*2) % aipath->n;
         ais[k].t = t; ais[k].lap = 0; ais[k].prevrel = t;
@@ -249,7 +267,94 @@ static int load_circuit(const char *dataroot, const char *circuit, N2Scene *scen
     return N_AI;
 }
 
+/* mmap a file read-only. Lazy paging: pages fault in only when touched, so a
+   100MB shared "master" region costs just the bytes actually read (TPK header +
+   the few textures we decode), not a full load. NULL on failure. */
+static unsigned char *n2_map_file(const char *path, long *len) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return NULL; }
+    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return NULL;
+    *len = (long)st.st_size;
+    return (unsigned char *)p;
+}
+
+/* Minimal 3x5 bitmap font (uppercase, digits, _ and -), 5 rows x 3 bits each
+   (bit 2 = left column). Rendered as one unit-quad per lit pixel — fine for the
+   handful of short labels in the menu. Index: 0=space, 1-10='0'-'9', 11-36=A-Z,
+   37='_', 38='-'. */
+static const unsigned char FONT3x5[][5] = {
+    {0,0,0,0,0},                                     /* space */
+    {7,5,5,5,7},{2,2,2,2,2},{7,1,7,4,7},{7,1,7,1,7},{5,5,7,1,1}, /* 0 1 2 3 4 */
+    {7,4,7,1,7},{7,4,7,5,7},{7,1,2,2,2},{7,5,7,5,7},{7,5,7,1,7}, /* 5 6 7 8 9 */
+    {7,5,7,5,5},{6,5,6,5,6},{7,4,4,4,7},{6,5,5,5,6},{7,4,6,4,7}, /* A B C D E */
+    {7,4,6,4,4},{7,4,5,5,7},{5,5,7,5,5},{7,2,2,2,7},{1,1,1,5,7}, /* F G H I J */
+    {5,5,6,5,5},{4,4,4,4,7},{5,7,5,5,5},{5,7,7,7,5},{7,5,5,5,7}, /* K L M N O */
+    {7,5,7,4,4},{7,5,5,7,1},{7,5,6,5,5},{7,4,7,1,7},{7,2,2,2,2}, /* P Q R S T */
+    {5,5,5,5,7},{5,5,5,5,2},{5,5,7,7,5},{5,5,2,5,5},{5,5,2,2,2}, /* U V W X Y */
+    {7,1,2,4,7},                                     /* Z */
+    {0,0,0,0,7},{0,0,7,0,0},                         /* _ - */
+};
+static const unsigned char *glyph3x5(char c) {
+    if (c >= '0' && c <= '9') return FONT3x5[1 + (c-'0')];
+    if (c >= 'A' && c <= 'Z') return FONT3x5[11 + (c-'A')];
+    if (c == '_') return FONT3x5[37];
+    if (c == '-') return FONT3x5[38];
+    return FONT3x5[0];
+}
+/* Draw an uppercase string at NDC (x,y = top-left), pixel size (px,py). Colour +
+   uUnlit/uUseTex are set by the caller; this only sets uMVP and draws pixels. */
+static void draw_text(GpuMesh *quad, GLint uMVP, const char *s, float x, float y, float px, float py) {
+    for (; *s; s++) {
+        const unsigned char *g = glyph3x5(*s);
+        for (int row = 0; row < 5; row++)
+            for (int col = 0; col < 3; col++)
+                if (g[row] & (4 >> col)) {
+                    float M[16] = { px*0.85f,0,0,0, 0,py*0.85f,0,0, 0,0,1,0,
+                                    x + col*px, y - row*py, 0, 1 };
+                    glUniformMatrix4fv(uMVP, 1, GL_FALSE, M);
+                    draw_gpumesh(quad);
+                }
+        x += 4*px;   /* 3 columns + 1 gap */
+    }
+}
+static float text_width(const char *s, float px) { return (float)strlen(s) * 4 * px; }
+
+/* Push (pos.xy) out of any wall AABB (expanded by r) it penetrates, along the
+   least-penetration axis; zero the into-wall velocity so the car slides along
+   the face. Returns the number of walls resolved. */
+static int collide_walls(float *pos, float *vel, const float obst[][4], int nobst, float r) {
+    int hits = 0;
+    for (int o = 0; o < nobst; o++) {
+        float x0=obst[o][0]-r, y0=obst[o][1]-r, x1=obst[o][2]+r, y1=obst[o][3]+r;
+        if (pos[0]<=x0 || pos[0]>=x1 || pos[1]<=y0 || pos[1]>=y1) continue;
+        float pl=pos[0]-x0, pr=x1-pos[0], pd=pos[1]-y0, pu=y1-pos[1], m=pl; int ax=0;
+        if (pr<m){m=pr;ax=1;} if (pd<m){m=pd;ax=2;} if (pu<m){m=pu;ax=3;}
+        if      (ax==0){ pos[0]=x0; if(vel[0]>0)vel[0]=0; }
+        else if (ax==1){ pos[0]=x1; if(vel[0]<0)vel[0]=0; }
+        else if (ax==2){ pos[1]=y0; if(vel[1]>0)vel[1]=0; }
+        else           { pos[1]=y1; if(vel[1]<0)vel[1]=0; }
+        hits++;
+    }
+    return hits;
+}
+static void collide_walls_selftest(void) {
+    float obst[1][4] = {{0,0,10,10}};
+    float p[3]={5,5,0}, v[2]={1,1};
+    assert(collide_walls(p, v, obst, 1, 1.0f) == 1);       /* deep inside -> resolved */
+    assert(p[0]<=0 || p[0]>=10 || p[1]<=0 || p[1]>=10);    /* ...and now outside the box */
+    float p2[3]={0.5f,5,0}, v2[2]={2,0};                   /* near left face, moving +x */
+    collide_walls(p2, v2, obst, 1, 1.0f);
+    assert(p2[0] <= -1.0f + 1e-4f && v2[0] == 0.0f);       /* pushed left, +x vel killed */
+    float p3[3]={100,100,0}, v3[2]={1,0};
+    assert(collide_walls(p3, v3, obst, 1, 1.0f) == 0);     /* far outside -> untouched */
+}
+
 int main(int argc, char **argv) {
+    collide_walls_selftest();
     /* Point at your own NFSU2 install/data directory (contains TRACKS/, CARS/).
        Usage: nfsu2 [DATA_DIR] [options]
          --car NAME       car folder under CARS/ (default HUMMER)
@@ -276,8 +381,32 @@ int main(int argc, char **argv) {
     long len; unsigned char *data = n2_read_file(trackp, &len);
     if (!data) { fprintf(stderr, "cannot read %s\n  (pass your NFSU2 data dir: nfsu2 /path/to/data)\n", trackp); return 1; }
 
+    /* resolvable texture keys for this region = local STREAM TPK record hashes
+       + shared LOC4DYNTEX keys + a shared "master" region's TPK (small regions
+       reference buildings whose textures live in a big neighbour — the master
+       is mmap'd so only the touched pages load). Used to pick each mesh's
+       diffuse slot and (later) to decode the textures. */
+    char loc4p[1024]; snprintf(loc4p, sizeof loc4p, "%s/TRACKS/LOC4DYNTEX.BIN", dataroot);
+    long loc4len; unsigned char *loc4 = n2_read_file(loc4p, &loc4len);
+    /* Location-4 shared texture library; use the other big region if we ARE it. */
+    /* Only mid-size regions need it: tiny proxies (<8MB) self-contain their
+       textures, and the huge master regions (>60MB) already carry their own. */
+    const char *mastername = strcmp(trackname, "STREAML4RD") ? "STREAML4RD" : "STREAML4RA";
+    char masterp[1024]; snprintf(masterp, sizeof masterp, "%s/TRACKS/%s.BUN", dataroot, mastername);
+    long masterlen = 0; unsigned char *master = NULL;
+    if (len > 8L*1024*1024 && len < 60L*1024*1024) master = n2_map_file(masterp, &masterlen);
+    N2Tpk localtpk = n2_tpk_open(data, len);
+    N2Tpk mastertpk = {0};
+    static uint32_t tkeys[16384]; int ntk = n2_tpk_keys(data, localtpk, tkeys, 16384);
+    if (loc4 && ntk < 16384) ntk += n2_car_tex_keys(loc4, loc4len, tkeys + ntk, 16384 - ntk);
+    if (master) {
+        mastertpk = n2_tpk_open(master, masterlen);
+        if (ntk < 16384) ntk += n2_tpk_keys(master, mastertpk, tkeys + ntk, 16384 - ntk);
+    }
+    printf("texture keyset: %d (local+LOC4%s)\n", ntk, master ? "+master" : "");
+
     N2Scene scene;
-    int nm = n2_load_scene(data, len, &scene);
+    int nm = n2_load_scene(data, len, &scene, tkeys, ntk);
     printf("loaded %d submeshes from %s\n", nm, trackp);
     N2Tex grass;
     int have_grass = n2_load_texture(data, len, "TRN_GRASSC", &grass);
@@ -300,6 +429,48 @@ int main(int argc, char **argv) {
     if (cnt){ cx/=cnt; cy/=cnt; cz/=cnt; }
     float maxr = 1;
     for (int c=0;c<3;c++) if ((mx[c]-mn[c])/2 > maxr) maxr = (mx[c]-mn[c])/2;
+
+    /* densest built-up spot: bin building (N2_OTHER) mesh positions into a grid
+       and take the peak cell. The geometry centroid is often an open hole (the
+       city spreads in a ring), so this is where to start the car for a view
+       that actually frames buildings. Falls back to the centroid if no props. */
+    float densx = cx, densy = cy;
+    {
+        static int hist[40][40]; memset(hist, 0, sizeof hist);
+        float gw = (mx[0]-mn[0])/40.0f, gh = (mx[1]-mn[1])/40.0f;
+        if (gw > 1e-3f && gh > 1e-3f) {
+            for (int i=0;i<nm;i++) if (scene.meshes[i].cat == N2_OTHER && scene.meshes[i].nverts) {
+                float *p = scene.meshes[i].verts;          /* first vertex ~ mesh location */
+                int gx=(int)((p[0]-mn[0])/gw), gy=(int)((p[1]-mn[1])/gh);
+                if (gx<0)gx=0; if (gx>39)gx=39; if (gy<0)gy=0; if (gy>39)gy=39;
+                hist[gx][gy]++;
+            }
+            int best=0, bx=20, by=20;
+            for (int gx=0;gx<40;gx++) for (int gy=0;gy<40;gy++)
+                if (hist[gx][gy] > best) { best=hist[gx][gy]; bx=gx; by=gy; }
+            if (best > 0) { densx = mn[0]+(bx+0.5f)*gw; densy = mn[1]+(by+0.5f)*gh; }
+        }
+    }
+    printf("dense build-up centre: (%.0f,%.0f)\n", densx, densy);
+
+    /* Building collision footprints: the 2D (XY) bounding box of every TALL
+       N2_OTHER mesh (a wall/building — flat props, signs and road paint have
+       little z-extent and are skipped, so they don't block the road). The car
+       is kept out of these. */
+    #define MAXOBST 8192
+    static float obst[MAXOBST][4]; int nobst = 0;
+    for (int i=0;i<nm && nobst<MAXOBST;i++) {
+        if (scene.meshes[i].cat != N2_OTHER || scene.meshes[i].nverts < 3) continue;
+        float ox0=1e30f,oy0=1e30f,oz0=1e30f, ox1=-1e30f,oy1=-1e30f,oz1=-1e30f;
+        for (int v=0;v<scene.meshes[i].nverts;v++){ float *p=scene.meshes[i].verts+v*5;
+            if(p[0]<ox0)ox0=p[0]; if(p[0]>ox1)ox1=p[0];
+            if(p[1]<oy0)oy0=p[1]; if(p[1]>oy1)oy1=p[1];
+            if(p[2]<oz0)oz0=p[2]; if(p[2]>oz1)oz1=p[2]; }
+        if (oz1-oz0 < 2.5f) continue;                        /* flat: not a wall */
+        if (ox1-ox0 > 300.0f || oy1-oy0 > 300.0f) continue;  /* skip oversized shells */
+        obst[nobst][0]=ox0; obst[nobst][1]=oy0; obst[nobst][2]=ox1; obst[nobst][3]=oy1; nobst++;
+    }
+    printf("collision obstacles: %d buildings\n", nobst);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
 
@@ -347,15 +518,14 @@ int main(int argc, char **argv) {
        that decode to noise (wrong format / swizzled surface), map key->GL tex.
        Generalises the old hard-coded TRN_GRASSC/RDP_PARKING lookup across
        regions (L4RR uses ORG_GRASS_001 etc.). */
-    char loc4p[1024]; snprintf(loc4p, sizeof loc4p, "%s/TRACKS/LOC4DYNTEX.BIN", dataroot);
-    long loc4len; unsigned char *loc4 = n2_read_file(loc4p, &loc4len);
-    uint32_t tmapkey[96]; GLuint tmaptex[96]; int ntmap = 0;
+    static uint32_t tmapkey[512]; static GLuint tmaptex[512]; int ntmap = 0;
     for (int i = 0; i < nm; i++) {
         uint32_t tk = scene.meshes[i].texkey; if (!tk) continue;
         int seen = 0; for (int j = 0; j < ntmap; j++) if (tmapkey[j]==tk) seen = 1;
-        if (seen || ntmap >= 96) continue;
-        N2Tex tt; int ok = n2_load_stream_tex_by_hash(data, len, tk, &tt);
+        if (seen || ntmap >= 512) continue;
+        N2Tex tt; int ok = n2_tpk_decode(data, len, localtpk, tk, &tt);
         if (!ok && loc4) ok = n2_load_car_tex_by_key(loc4, loc4len, tk, &tt);
+        if (!ok && master) ok = n2_tpk_decode(master, masterlen, mastertpk, tk, &tt);
         if (ok && !n2_tex_noise(&tt)) {
             tmapkey[ntmap] = tk; tmaptex[ntmap] = upload_tex(&tt); ntmap++;
         }
@@ -421,6 +591,32 @@ int main(int argc, char **argv) {
         if (td) closedir(td);
     }
 
+    /* Enumerate selectable CARS (folders under CARS/ with a GEOMETRY.BIN, minus
+       the part folders). Switching car re-launches the process, like tracks. */
+    #define MAXCARS 64
+    char carlist[MAXCARS][64]; int ncars = 0, selcar = 0;
+    {
+        static const char *parts[] = { "AUDIO","BRAKES","EXHAUST","PLATES","ROOF",
+            "WHEELS","SPOILER","SPOILER_HATCH","SPOILER_SUV","MIRRORS_BODY",
+            "MIRRORS_HUMMER","MIRRORS_POST","MIRRORS_SUV" };
+        char croot[1024]; snprintf(croot, sizeof croot, "%s/CARS", dataroot);
+        DIR *cd = opendir(croot); struct dirent *de;
+        while (cd && ncars < MAXCARS && (de = readdir(cd))) {
+            if (de->d_name[0] == '.') continue;
+            int isp = 0;
+            for (unsigned p = 0; p < sizeof parts/sizeof parts[0]; p++)
+                if (!strcmp(de->d_name, parts[p])) isp = 1;
+            if (isp) continue;
+            char gp[1200]; snprintf(gp, sizeof gp, "%s/%s/GEOMETRY.BIN", croot, de->d_name);
+            FILE *f = fopen(gp, "rb"); if (!f) continue; fclose(f);
+            int L = (int)strlen(de->d_name); if (L > 63) L = 63;
+            memcpy(carlist[ncars], de->d_name, L); carlist[ncars][L] = 0;
+            if (!strcmp(carlist[ncars], carname)) selcar = ncars;
+            ncars++;
+        }
+        if (cd) closedir(cd);
+    }
+
     /* Enumerate selectable circuits for the pre-race menu: closed-loop
        Paths*.bin (first waypoint ~= last) lying within this track's footprint,
        so switching route never flings the cars off the rendered map. */
@@ -465,7 +661,7 @@ int main(int argc, char **argv) {
     N2Path aipath = {0};
     AiCar ais[N_AI]; int start_idx = 0;
     int nai = ncirc ? load_circuit(dataroot, circlist[selcirc], &scene, &aipath,
-                                   ais, spawn, &heading0, &start_idx) : 0;
+                                   ais, spawn, &heading0, &start_idx, densx, densy) : 0;
     if (nai) printf("circuit: %d-waypoint loop; %d AI racers, lap system on\n",
                     aipath.n, nai);
 
@@ -516,24 +712,37 @@ int main(int argc, char **argv) {
                 SDL_Keycode k = e.key.keysym.sym;
                 if (k == SDLK_ESCAPE) running = 0;
                 else if (race_state == 3) {   /* pre-race menu navigation */
-                    if ((k==SDLK_LEFT || k==SDLK_RIGHT) && ncirc > 1) {
-                        selcirc = (selcirc + (k==SDLK_RIGHT?1:ncirc-1)) % ncirc;
-                        nai = load_circuit(dataroot, circlist[selcirc], &scene,
-                                           &aipath, ais, spawn, &heading0, &start_idx);
-                        carpos[0]=spawn[0]; carpos[1]=spawn[1]; carpos[2]=spawn[2];
-                        heading=heading0; vel[0]=vel[1]=0; speed=0; p_lap=p_prev=0;
+                    /* car and track each mean a whole new load, so they re-launch
+                       the process; circuit is a cheap in-place reload. */
+                    char *na[8]; int a=0;
+                    if ((k==SDLK_LEFT || k==SDLK_RIGHT) && ncars > 1) {
+                        selcar = (selcar + (k==SDLK_RIGHT?1:ncars-1)) % ncars;
+                        na[a++]=(char*)selfexe; na[a++]=(char*)dataroot;
+                        na[a++]="--car"; na[a++]=carlist[selcar];
+                        na[a++]="--track"; na[a++]=(char*)trackname; na[a]=NULL;
+                        SDL_Quit(); execvp(selfexe, na); return 1;
                     } else if ((k==SDLK_UP || k==SDLK_DOWN) && ntrack > 1) {
-                        /* switching track means a whole new scene: re-launch the
-                           process on it rather than tearing down all GL state. */
                         seltrack = (seltrack + (k==SDLK_DOWN?1:ntrack-1)) % ntrack;
-                        char *na[8]; int a=0;
                         na[a++]=(char*)selfexe; na[a++]=(char*)dataroot;
                         na[a++]="--car"; na[a++]=(char*)carname;
                         na[a++]="--track"; na[a++]=tracklist[seltrack]; na[a]=NULL;
-                        SDL_Quit();
-                        execvp(selfexe, na);
-                        return 1;   /* only reached if exec failed */
+                        SDL_Quit(); execvp(selfexe, na); return 1;
+                    } else if ((k==SDLK_LEFTBRACKET || k==SDLK_RIGHTBRACKET) && ncirc > 1) {
+                        selcirc = (selcirc + (k==SDLK_RIGHTBRACKET?1:ncirc-1)) % ncirc;
+                        nai = load_circuit(dataroot, circlist[selcirc], &scene,
+                                           &aipath, ais, spawn, &heading0, &start_idx, densx, densy);
+                        carpos[0]=spawn[0]; carpos[1]=spawn[1]; carpos[2]=spawn[2];
+                        heading=heading0; vel[0]=vel[1]=0; speed=0; p_lap=p_prev=0;
                     } else if (k==SDLK_RETURN || k==SDLK_SPACE) {
+                        /* snap the player from the showcase spot to the circuit
+                           start line so the race itself is fair. */
+                        if (aipath.n > 0) {
+                            carpos[0]=aipath.xy[start_idx*2]; carpos[1]=aipath.xy[start_idx*2+1];
+                            carpos[2]=n2_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
+                            int nx=(start_idx+1)%aipath.n;
+                            heading=atan2f(aipath.xy[nx*2+1]-carpos[1], aipath.xy[nx*2]-carpos[0]);
+                            vel[0]=vel[1]=0; speed=0;
+                        }
                         race_state = 0; racetimer = 0;   /* -> 3-2-1 countdown */
                     }
                 }
@@ -545,14 +754,21 @@ int main(int argc, char **argv) {
         const Uint8 *ks = SDL_GetKeyboardState(NULL);
         float hf[2] = { cosf(heading), sinf(heading) };
         if (race_state == 1) {
-            if (ks[SDL_SCANCODE_W] || shot) { vel[0]+=hf[0]*ACCEL; vel[1]+=hf[1]*ACCEL; }
+            /* throttle tapers as speed builds: punchy off the line, eases near top */
+            if (ks[SDL_SCANCODE_W] || shot) {
+                float a = ACCEL * (1.15f - 0.55f*(speed<0?-speed:speed)/MAXSPD);
+                vel[0]+=hf[0]*a; vel[1]+=hf[1]*a;
+            }
             if (ks[SDL_SCANCODE_S])         { vel[0]-=hf[0]*ACCEL*0.7f; vel[1]-=hf[1]*ACCEL*0.7f; }
         }
         vel[0]*=FRICTION; vel[1]*=FRICTION;
         float spd = sqrtf(vel[0]*vel[0]+vel[1]*vel[1]);
         float dir = (vel[0]*hf[0]+vel[1]*hf[1]) < 0 ? -1.f : 1.f;  /* fwd vs reverse */
         float steer = (ks[SDL_SCANCODE_A]?1.f:0.f) - (ks[SDL_SCANCODE_D]?1.f:0.f);
-        heading += steer * TURN * (spd/MAXSPD) * dir;
+        /* turn authority ramps in by ~35% of top speed then holds — responsive
+           from low speed without getting twitchy/spinny flat out. */
+        float sfac = spd/(MAXSPD*0.35f); if (sfac > 1) sfac = 1;
+        heading += steer * TURN * sfac * dir;
         if (shot && nai > 0) {   /* screenshot autopilot: steer toward nearest AI */
             float da = atan2f(ais[0].pos[1]-carpos[1], ais[0].pos[0]-carpos[0]) - heading;
             while (da> 3.14159f) da-=6.28318f;
@@ -565,7 +781,10 @@ int main(int argc, char **argv) {
         float vf = vel[0]*nf[0]+vel[1]*nf[1], vl = vel[0]*nr[0]+vel[1]*nr[1];
         if (vf >  MAXSPD) vf =  MAXSPD;
         if (vf < -MAXSPD*0.4f) vf = -MAXSPD*0.4f;
-        vl *= GRIP;
+        /* handbrake (Space while racing): rear grip lets go, so the lateral
+           velocity survives and the car slides — drift it through corners. */
+        float grip = (race_state==1 && ks[SDL_SCANCODE_SPACE]) ? 0.985f : GRIP;
+        vl *= grip;
         vel[0] = nf[0]*vf + nr[0]*vl; vel[1] = nf[1]*vf + nr[1]*vl;
         speed = vf;                       /* forward speed, for HUD/collision */
         /* engine note follows speed (idle rev during the countdown) */
@@ -575,6 +794,8 @@ int main(int argc, char **argv) {
           g_road_vol = sp*sp*0.35f; }   /* tyre/wind roar rises with speed */
         float fwd[3] = { nf[0], nf[1], 0 };
         carpos[0] += vel[0]; carpos[1] += vel[1];
+        /* building collision: push the car out of any wall footprint it entered.*/
+        if (race_state == 1 && collide_walls(carpos, vel, obst, nobst, 1.3f)) g_hit = 0.5f;
         /* sit on the road/terrain surface (smoothed to avoid jitter) */
         float gz = n2_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
         carpos[2] += (gz - carpos[2]) * 0.35f;
@@ -684,11 +905,11 @@ int main(int argc, char **argv) {
 
         /* camera: menu = slow orbit around the parked car; else chase cam */
         float want[3];
-        if (race_state == 3) {
-            menuspin += 0.008f;
-            want[0] = carpos[0] + cosf(menuspin)*9.0f;
-            want[1] = carpos[1] + sinf(menuspin)*9.0f;
-            want[2] = carpos[2] + 3.5f;
+        if (race_state == 3) {              /* orbit the parked car, framing the city around it */
+            menuspin += 0.006f;
+            want[0] = carpos[0] + cosf(menuspin)*16.0f;
+            want[1] = carpos[1] + sinf(menuspin)*16.0f;
+            want[2] = carpos[2] + 8.0f;
         } else {
             want[0] = carpos[0]-fwd[0]*10; want[1] = carpos[1]-fwd[1]*10;
             want[2] = carpos[2]+4.5f;
@@ -698,7 +919,7 @@ int main(int argc, char **argv) {
 
         int W, H; SDL_GL_GetDrawableSize(win, &W, &H);
         glViewport(0, 0, W, H);
-        glClearColor(0.02f, 0.03f, 0.05f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClearColor(0.06f, 0.07f, 0.11f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float P[16], V[16], MVP[16];
         /* menu orbits ~9m from the car, so use a close near-plane there;
@@ -869,27 +1090,42 @@ int main(int argc, char **argv) {
         glDisable(GL_DEPTH_TEST);
         glUniform1f(uUnlit, 1.0f); glUniform1f(uUseTex, 0.0f);
         if (race_state == 3) {
+            /* car selector (Left/Right): a tight row of pips, chosen lit white */
+            float cw = 0.02f, cx0 = -((ncars-1)*cw)/2.0f;
+            for (int i = 0; i < ncars; i++) {
+                int s = (i == selcar);
+                float M[16]={0.014f,0,0,0, 0,s?0.05f:0.028f,0,0, 0,0,1,0, cx0+i*cw,0.44f,0,1};
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
+                if (s) glUniform3f(uColor,0.95f,0.95f,0.98f);
+                else   glUniform3f(uColor,0.30f,0.32f,0.38f);
+                draw_gpumesh(&quad);
+            }
             /* track selector (Up/Down): one blue pip per STREAM*.BUN found */
             float tx0 = -((ntrack-1)*0.05f)/2.0f;
             for (int i = 0; i < ntrack; i++) {
                 int s = (i == seltrack);
-                float M[16]={0.035f,0,0,0, 0,s?0.05f:0.03f,0,0, 0,0,1,0, tx0+i*0.05f,0.42f,0,1};
+                float M[16]={0.035f,0,0,0, 0,s?0.05f:0.03f,0,0, 0,0,1,0, tx0+i*0.05f,0.36f,0,1};
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
                 if (s) glUniform3f(uColor,0.3f,0.7f,1.0f);
                 else   glUniform3f(uColor,0.25f,0.3f,0.4f);
                 draw_gpumesh(&quad);
             }
-            /* circuit selector (Left/Right): one pip per circuit, chosen lit + tall */
+            /* circuit selector ([ / ]): one yellow pip per circuit, chosen lit + tall */
             float x0 = -((ncirc-1)*0.05f)/2.0f;
             for (int i = 0; i < ncirc; i++) {
                 int s = (i == selcirc);
-                float h = s?0.05f:0.03f, y = 0.30f - (s?0.01f:0);
+                float h = s?0.05f:0.03f, y = 0.29f - (s?0.01f:0);
                 float M[16]={0.035f,0,0,0, 0,h,0,0, 0,0,1,0, x0+i*0.05f,y,0,1};
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,M);
                 if (s) glUniform3f(uColor,0.95f,0.8f,0.2f);
                 else   glUniform3f(uColor,0.3f,0.3f,0.35f);
                 draw_gpumesh(&quad);
             }
+            /* labels: car name (big, white) above its pips; track name below */
+            glUniform3f(uColor, 0.95f, 0.95f, 0.98f);
+            draw_text(&quad, uMVP, carname, -text_width(carname,0.017f)/2, 0.56f, 0.017f, 0.026f);
+            glUniform3f(uColor, 0.45f, 0.7f, 1.0f);
+            draw_text(&quad, uMVP, trackname, -text_width(trackname,0.012f)/2, 0.23f, 0.012f, 0.02f);
             /* "press ENTER" prompt: a gently pulsing green bar */
             float pulse = 0.55f + 0.45f*sinf(menuspin*6.0f);
             float M[16]={0.5f,0,0,0, 0,0.06f,0,0, 0,0,1,0, -0.25f,-0.25f,0,1};

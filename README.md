@@ -75,14 +75,18 @@ Pick the car, track and circuit (defaults shown):
 - `--track NAME` — a `STREAM*.BUN` under `TRACKS/` (e.g. `STREAML4RR`).
 - `--circuit PATH` — a closed-loop `Paths*.bin` under `TRACKS/`.
 
-It opens on a **pre-race menu**: the car orbits over the track while you pick
-a **track** (Up/Down — the engine scans your `TRACKS/` for `STREAM*.BUN`) and
-a **circuit** (Left/Right — closed loops it found on that track). `Enter`
-starts the 3-2-1. `--car`/`--track`/`--circuit` above just preselect the menu.
+It opens on a **pre-race menu**: the car orbits amid the city while you pick a
+**car** (Left/Right — every drivable folder under `CARS/`), a **track** (Up/Down
+— `STREAM*.BUN` under `TRACKS/`) and a **circuit** (`[` / `]` — closed loops
+found on that track). `Enter` starts the 3-2-1. `--car`/`--track`/`--circuit`
+above just preselect the menu. (Car and track changes re-launch the engine to
+load fresh; circuit is an in-place reload.)
 
-**Controls:** menu — `←`/`→` circuit, `↑`/`↓` track, `Enter` race; driving —
-`W`/`S` throttle/brake, `A`/`D` steer, `Esc` quit. Cars collide (they shove
-each other). `--shot out.png` renders one frame to a PNG and exits.
+**Controls:** menu — `←`/`→` car, `↑`/`↓` track, `[`/`]` circuit, `Enter` race;
+driving — `W`/`S` throttle/brake, `A`/`D` steer, `Space` handbrake (breaks rear
+grip for drifts), `Esc` quit. Cars collide (they shove each other) and you can't
+drive through buildings — the car slides along wall footprints. `--shot out.png`
+renders one frame to a PNG and exits.
 
 ## Layout
 

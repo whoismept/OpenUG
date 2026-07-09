@@ -56,20 +56,38 @@ material record carrying a texture name/hash.
 Two container variants, both DXT-compressed S3TC.
 
 **Track TPK (uncompressed table).** Header block `0xb3310000` holds fixed
-`0x7c`-byte records: name @`+0`, **record hash @`+0x18`** (what meshes
-reference — a precomputed value, *not* always `binhash(name)`), data offset
-@`+0x24`, size @`+0x2c`, `width/height` as a `u16` pair @`+0x38`. Pixels are in
-block `0xb3320000`, but relative to the payload of its **`0x33320002`
-sub-chunk** (there's a `0x33320001` info sub-chunk first). Format is **DXT1 or
-DXT3**, inferred from size (DXT3 base `= W·H`, DXT1 `= W·H/2`).
+`0x7c`-byte records. The record is the NFSU2 texture header (per the Nikki
+library, minus a `0x0C` padding prefix that this in-place variant omits):
+
+```
++0x18 BinKey (u32)          // record hash — what meshes reference
++0x24 Offset (u32)          // texture data offset
++0x28 PaletteOffset (u32)   // palette offset (P8 only)
++0x2c Size (u32)
++0x30 PaletteSize (u32)     // 0 = not palettized; 1024 = 256-entry RGBA
++0x38 Width  (u16)
++0x3a Height (u16)
+```
+
+Pixels are in block `0xb3320000`, under its **`0x33320002`** sub-chunk payload
+(a `0x33320001` info sub-chunk comes first), and **`Offset`/`PaletteOffset` are
+relative to the data start after the `0x11` alignment filler** that prefixes it
+(same quirk as vertex buffers). Three pixel formats occur, distinguished by the
+record, not the (always-0) compression byte:
+
+- **P8** (`PaletteSize >= 1024`) — a 256-entry RGBA palette at `PaletteOffset`
+  then 8-bit indices at `Offset`. This is what the road-surface textures use
+  (`RDP_AIRPORT_ROADPATCH_A` is 512×512 P8), which is why they looked like
+  high-entropy noise until decoded through the palette — **not** a swizzle.
+- **DXT1 / DXT3** (no palette) — inferred from `Size` (DXT3 base `= W·H`, DXT1
+  `= W·H/2`).
 
 Track meshes bind textures exactly like cars: the `0x134012` slot list's key →
-a TPK record hash. Each region's own `STREAM*.BUN` TPK carries its
+a TPK record `BinKey`. Each region's own `STREAM*.BUN` TPK carries its
 grass/road/prop textures (names vary per region: `TRN_GRASSC` vs
 `ORG_GRASS_001`, `RDP_PARKING…` vs `RDP_AIRPORT_ROADPATCH_A`), and the shared
 `TRACKS/LOC4DYNTEX.BIN` (a compressed offset-slot TPK, same format as car
-TEXTURES.BIN) holds the sky + facade textures. *Open:* some large road-surface
-textures decode to noise (likely a swizzled/tiled layout) — not yet solved.
+TEXTURES.BIN) holds the sky + facade textures.
 
 **Car TPK (`CARS/*/TEXTURES.BIN`, compressed).** Same outer container
 (`0xb3300000` → `0xb3310000` header + `0xb3320000` pixels). The header block
@@ -147,7 +165,9 @@ independent implementation.
   reverse-engineering project of NFSU2. The chunk-container structure (the
   8-byte `magic`+`size` header and the `0x8`-nibble nesting rule) was confirmed
   against yugecin's documentation. Huge thanks — great work.
-- **[Nikki](https://github.com/MaxHwoy/Nikki)** — NFS modding library; reference
-  for the TPK layout and the NFSU2 texture header struct.
+- **[Nikki](https://github.com/MaxHwoy/Nikki)** — NFS modding library; the
+  reference for the TPK layout and the NFSU2 texture-header struct. Its field
+  layout was what revealed the `PaletteOffset`/`PaletteSize` fields and cracked
+  the P8 road-surface textures (which had otherwise looked like noise).
 - **[OpenNFSTools](https://github.com/MWisBest/OpenNFSTools)** — reference for
   the JDLZ decompression algorithm.
