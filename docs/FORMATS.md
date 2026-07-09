@@ -56,8 +56,20 @@ material record carrying a texture name/hash.
 Two container variants, both DXT-compressed S3TC.
 
 **Track TPK (uncompressed table).** Header block `0xb3310000` holds fixed
-`0x7c`-byte records: name @`+0`, data offset @`+0x24`, size @`+0x2c`,
-`width/height` as a `u16` pair @`+0x38`; pixels are DXT1 in block `0xb3320000`.
+`0x7c`-byte records: name @`+0`, **record hash @`+0x18`** (what meshes
+reference — a precomputed value, *not* always `binhash(name)`), data offset
+@`+0x24`, size @`+0x2c`, `width/height` as a `u16` pair @`+0x38`. Pixels are in
+block `0xb3320000`, but relative to the payload of its **`0x33320002`
+sub-chunk** (there's a `0x33320001` info sub-chunk first). Format is **DXT1 or
+DXT3**, inferred from size (DXT3 base `= W·H`, DXT1 `= W·H/2`).
+
+Track meshes bind textures exactly like cars: the `0x134012` slot list's key →
+a TPK record hash. Each region's own `STREAM*.BUN` TPK carries its
+grass/road/prop textures (names vary per region: `TRN_GRASSC` vs
+`ORG_GRASS_001`, `RDP_PARKING…` vs `RDP_AIRPORT_ROADPATCH_A`), and the shared
+`TRACKS/LOC4DYNTEX.BIN` (a compressed offset-slot TPK, same format as car
+TEXTURES.BIN) holds the sky + facade textures. *Open:* some large road-surface
+textures decode to noise (likely a swizzled/tiled layout) — not yet solved.
 
 **Car TPK (`CARS/*/TEXTURES.BIN`, compressed).** Same outer container
 (`0xb3300000` → `0xb3310000` header + `0xb3320000` pixels). The header block
@@ -75,9 +87,33 @@ i32 Unknown
 
 Each block at `AbsoluteOffset` is **JDLZ**-compressed (EA's LZ; header
 `"JDLZ"`, `u32 decodedSize @+8`, `u32 encodedSize @+12`). Decompress to get the
-raw DXT pixels — **DXT1 or DXT3** (DXT3 = 16-byte blocks: 8-byte 4-bit explicit
-alpha + 8-byte DXT1 colour). Dimensions follow from `DecodedSize` (for DXT3,
-`decoded ≈ W·H·4/3` including the mip chain, so e.g. `1398172 → 512×512`).
+raw DXT pixels directly (no per-texture header) — **DXT1 or DXT3** (DXT3 =
+16-byte blocks: 8-byte 4-bit explicit alpha + 8-byte DXT1 colour). The format
+isn't stored, so infer it: the textures are **square**, and only one
+`(side, format)` makes a full mip chain sum to `DecodedSize` (DXT1 base
+`W·H/2`, DXT3 base `W·H`, each mip ≈ ¼ the last). E.g. a HUMMER body detail
+atlas is `21980 → 128×128 DXT3`; its wheel is `11068 → 128×128 DXT1`.
+
+## Car material → texture binding (`GEOMETRY.BIN`)
+
+Each car mesh (`0x80134010`) carries, alongside its `0x134011` **material**
+record (part name + a bounding box + a transform), a `0x134012` **texture-slot
+list**: 8-byte entries `u32 key, u32 0`. A mesh lists several slot hashes
+(diffuse / normal / spec / …); the one whose `key` is present in the car's TPK
+offset-slot table is that mesh's **diffuse** — bind it and sample via the
+mesh's UVs. (A HUMMER references only ~6 of its 58 TPK textures this way: one
+body atlas across 105 body meshes, plus wheel / brake / engine.)
+
+The hashes are the standard **NFS "bin" hash** of the asset name:
+
+```
+h = 0xFFFFFFFF;  for each byte c of the name:  h = h*0x21 + c   (mod 2^32)
+```
+
+Verified: the material's part-name hash at `0x134011 +0x10` equals
+`binhash("HUMMER_BASE_A") = 0xEE913807`. The same hash keys the TPK slots, so a
+material→texture link needs no name strings — just the `0x134012` slot list
+intersected with the TPK keys.
 
 ## Racing lines & circuits (`TRACKS/ROUTES*/Paths*.bin`)
 

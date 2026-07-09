@@ -21,13 +21,21 @@ source; you bring your own copy of the game.**
 Early but real — the full asset→render→drive pipeline works end to end:
 
 - **Track** — parses `STREAM*.BUN` scenery (chunk `0x134xxx`), assembles the
-  world-space road/terrain, textures it (DXT1), and culls the skybox.
+  world-space road/terrain, and **per-mesh textures** it: each mesh's `0x134012`
+  key resolves to a texture in the region's own STREAM TPK or the shared
+  `LOC4DYNTEX.BIN` (works across regions; textures that don't decode fall back).
 - **Car** — loads a car model (`GEOMETRY.BIN`, 36-byte vertices with normals)
-  and its body texture (`TEXTURES.BIN`: JDLZ-decompressed + DXT1/DXT3).
-- **Driving** — arcade car physics, ground-height follow, chase camera.
-- **Racing** — AI opponents follow the game's own racing line
-  (`ROUTES*/Paths*.bin`); a 3-2-1 countdown start, lap counting on a closed
-  circuit, finish + placing, and a font-free race-position HUD.
+  with **per-mesh textures**: each part's `0x134012` slot list is matched
+  against the car's TPK (`TEXTURES.BIN`: JDLZ-decompressed + DXT1/DXT3) so the
+  body, wheels and details each wear their own decoded texture via real UVs.
+- **Driving** — arcade car physics with grip/drift (tyre skid marks that fade
+  over time + drift smoke when you slide), ground-height follow, chase camera, a speedometer,
+  and a procedural engine sound (no audio assets — synthesised, pitch
+  follows speed).
+- **Racing** — a pre-race menu (orbiting-car preview; pick track + circuit),
+  AI opponents that follow the game's own racing line (`ROUTES*/Paths*.bin`), a
+  3-2-1 countdown start, lap counting on a closed circuit, finish + placing,
+  and a font-free race-position HUD.
 
 See [`docs/FORMATS.md`](docs/FORMATS.md) for the reverse-engineered file formats.
 
@@ -57,8 +65,24 @@ Point it at your NFS: Underground 2 data directory (the folder containing
 make run DATA=/path/to/nfsu2/data
 ```
 
-**Controls:** `W`/`S` throttle/brake, `A`/`D` steer, `Esc` quit.
-`--shot out.png` renders one frame to a PNG and exits (headless-friendly).
+Pick the car, track and circuit (defaults shown):
+
+```sh
+./nfsu2 DATA --car HUMMER --track STREAML4RH --circuit ROUTESL4RF/Paths4602.bin
+```
+
+- `--car NAME` — a folder under `CARS/` (needs a `GEOMETRY.BIN`).
+- `--track NAME` — a `STREAM*.BUN` under `TRACKS/` (e.g. `STREAML4RR`).
+- `--circuit PATH` — a closed-loop `Paths*.bin` under `TRACKS/`.
+
+It opens on a **pre-race menu**: the car orbits over the track while you pick
+a **track** (Up/Down — the engine scans your `TRACKS/` for `STREAM*.BUN`) and
+a **circuit** (Left/Right — closed loops it found on that track). `Enter`
+starts the 3-2-1. `--car`/`--track`/`--circuit` above just preselect the menu.
+
+**Controls:** menu — `←`/`→` circuit, `↑`/`↓` track, `Enter` race; driving —
+`W`/`S` throttle/brake, `A`/`D` steer, `Esc` quit. Cars collide (they shove
+each other). `--shot out.png` renders one frame to a PNG and exits.
 
 ## Layout
 
@@ -71,8 +95,9 @@ docs/    format documentation
 ## Contributing
 
 Reverse-engineering notes live in `docs/FORMATS.md`; the `tools/` scripts are
-handy for poking at the data. Good next steps: per-mesh car material binding,
-more tracks/cars, collision, a race start/finish flow, audio.
+handy for poking at the data. Good next steps: decoding the global road-texture
+pack (roads currently draw as flat asphalt), stitching multiple track regions,
+and a proper front-end menu.
 
 ## Credits
 

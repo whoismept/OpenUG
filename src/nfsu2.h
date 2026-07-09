@@ -21,6 +21,7 @@ typedef struct {
     uint16_t *idx;
     int      nidx;
     int      cat;     /* N2_ROAD / N2_TERRAIN / N2_OTHER, from material name */
+    uint32_t texkey;  /* car meshes: bound TPK diffuse key (0x134012), 0 if none */
 } N2Mesh;
 
 typedef struct {
@@ -113,7 +114,7 @@ static int n2_mesh_category(const unsigned char *d, long beg, long end) {
  * (car, normal@12 uv@24). cull_skybox drops huge shells (tracks only). */
 static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
                         int cat, N2Scene *scene,
-                        int stride, int uvoff, int cull_skybox) {
+                        int stride, int uvoff, int cull_skybox, uint32_t texkey) {
     const unsigned char *vb = d + vtx.off;
     int vlen = (int)vtx.size;
     int pad = n2_skip_filler(vb, vlen);
@@ -135,7 +136,7 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
     }
 
     N2Mesh m; memset(&m, 0, sizeof(m));
-    m.cat = cat; m.nverts = n;
+    m.cat = cat; m.texkey = texkey; m.nverts = n;
     m.verts = (float *)malloc(n * 5 * sizeof(float));
     for (int i = 0; i < n; i++) {
         memcpy(m.verts + i*5,     rec + i*stride,          12);
@@ -157,6 +158,20 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
     n2_push_mesh(scene, m);
 }
 
+/* Track meshes: the diffuse is the LAST non-zero key in the 0x134012 slot list
+ * (road/terrain/prop/sky all fit this); resolving it to a texture happens at
+ * bind time, so a missing/garbage texture cleanly falls back (not to grass). */
+static uint32_t n2_mesh_last_texkey(const unsigned char *d, long beg, long end) {
+    N2Leaf t12[4]; int n12 = 0;
+    n2_find_leaves(d, beg, end, 0x00134012u, t12, &n12, 4);
+    uint32_t last = 0;
+    for (int a = 0; a < n12; a++) {
+        const unsigned char *p = d + t12[a].off; long ls = t12[a].size;
+        for (long b = 0; b + 4 <= ls; b += 4) { uint32_t v = n2_u32(p + b); if (v) last = v; }
+    }
+    return last;
+}
+
 /* Walk to every 0x80134010 mesh, classify it, extract its vtx/idx pairs. */
 static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *scene) {
     long o = beg;
@@ -165,12 +180,13 @@ static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *
         long ds = o + 8;
         if (magic == 0x80134010u) {
             int cat = n2_mesh_category(d, ds, ds + size);
+            uint32_t tk = n2_mesh_last_texkey(d, ds, ds + size);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + size, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + size, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
             for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1);
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1, tk);
         } else if (magic != 0 && (magic >> 28) == 8) {
             n2_walk_meshes(d, ds, ds + size, scene);
         }
@@ -211,30 +227,50 @@ static int n2_car_category(const unsigned char *d, long beg, long end) {
     return N2_CAR_MISC;
 }
 
+/* Find this mesh's bound diffuse: scan its 0x134012 texture-slot list (8-byte
+ * entries: key + 0) for a key present in the car's TPK (keys[]). 0 if none. */
+static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
+                               const uint32_t *keys, int nkeys) {
+    if (!nkeys) return 0;
+    N2Leaf t12[4]; int n12 = 0;
+    n2_find_leaves(d, beg, end, 0x00134012u, t12, &n12, 4);
+    for (int a = 0; a < n12; a++) {
+        const unsigned char *p = d + t12[a].off; long ls = t12[a].size;
+        for (long b = 0; b + 4 <= ls; b += 4) {
+            uint32_t v = n2_u32(p + b);
+            for (int c = 0; c < nkeys; c++) if (v == keys[c]) return v;
+        }
+    }
+    return 0;
+}
+
 /* Parse a car GEOMETRY.BIN (36-byte verts w/ normals), tagging each mesh with
- * a class from its material name (body/glass/light/tire/misc). */
-static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *scene) {
+ * a class from its material name and its per-mesh diffuse texture key. */
+static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *scene,
+                        const uint32_t *keys, int nkeys) {
     long o = beg;
     while (o + 8 <= end) {
         uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
         long ds = o + 8;
         if (m == 0x80134010u) {
             int cat = n2_car_category(d, ds, ds + s);
+            uint32_t tk = n2_mesh_texkey(d, ds, ds + s, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + s, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
             for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0);
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk);
         } else if (m != 0 && (m >> 28) == 8) {
-            n2_walk_car(d, ds, ds + s, scene);
+            n2_walk_car(d, ds, ds + s, scene, keys, nkeys);
         }
         o = ds + s;
     }
 }
-static int n2_load_car(const unsigned char *d, long len, N2Scene *scene) {
+static int n2_load_car(const unsigned char *d, long len, N2Scene *scene,
+                       const uint32_t *keys, int nkeys) {
     memset(scene, 0, sizeof(*scene));
-    n2_walk_car(d, 0, len, scene);
+    n2_walk_car(d, 0, len, scene, keys, nkeys);
     return scene->count;
 }
 
@@ -371,6 +407,68 @@ static int n2_jdlz(const unsigned char *s, int slen, unsigned char *out, int out
     return op;
 }
 
+/* Locate the car TPK offset-slot table (0x33310003, 24-byte records) inside the
+ * 0xb3310000 header block. Returns the payload pointer + size, or NULL. */
+static const unsigned char *n2_tpk_slots(const unsigned char *d, long len, uint32_t *outsz) {
+    long hoff = -1;
+    for (long i = 0; i + 4 < len; i++)
+        if (d[i]==0 && d[i+1]==0 && d[i+2]==0x31 && d[i+3]==0xb3) { hoff = i + 8; break; }
+    if (hoff < 0) return NULL;
+    uint32_t hsz = n2_u32(d + hoff - 4); long hend = hoff + hsz, o = hoff;
+    while (o + 8 <= hend) {
+        uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
+        if (m == 0x33310003u) { *outsz = s; return d + o + 8; }
+        o += 8 + s;
+    }
+    return NULL;
+}
+
+/* All texture keys present in the car TPK (offset-slot table). Returns count. */
+static int n2_car_tex_keys(const unsigned char *d, long len, uint32_t *keys, int maxk) {
+    uint32_t sz; const unsigned char *p = n2_tpk_slots(d, len, &sz);
+    if (!p) return 0;
+    int n = 0;
+    for (uint32_t i = 0; i + 0x18 <= sz && n < maxk; i += 0x18) keys[n++] = n2_u32(p + i);
+    return n;
+}
+
+/* Byte size of a full mip chain for a square s×s texture (bpb = 8 DXT1 / 16 DXT3). */
+static int n2_mipbytes(int s, int bpb) {
+    int t = 0, w = s;
+    for (;;) { int bw = w < 4 ? 1 : w/4; t += bw*bw*bpb; if (w == 1) break; w /= 2; }
+    return t;
+}
+
+/* Decode ONE car texture by its TPK key: find the slot, JDLZ-decompress, then
+ * recover square dims + DXT1/DXT3 by matching the mip-chain size to DecodedSize
+ * (car textures are square; format isn't stored, so it's inferred). Returns 1. */
+static int n2_load_car_tex_by_key(const unsigned char *d, long len, uint32_t key, N2Tex *t) {
+    uint32_t sz; const unsigned char *p = n2_tpk_slots(d, len, &sz);
+    if (!p) return 0;
+    int absoff = 0, enc = 0, dec = 0;
+    for (uint32_t i = 0; i + 0x18 <= sz; i += 0x18)
+        if (n2_u32(p + i) == key) {
+            absoff = (int)n2_u32(p + i + 4); enc = (int)n2_u32(p + i + 8);
+            dec = (int)n2_u32(p + i + 12); break;
+        }
+    if (dec <= 0 || absoff < 0 || (long)absoff + enc > len) return 0;
+    unsigned char *raw = (unsigned char *)malloc(dec);
+    n2_jdlz(d + absoff, enc, raw, dec);
+    int side = 0, dxt3 = 0, bestd = 1 << 30;
+    for (int s = 8; s <= 512; s <<= 1) {
+        int d1 = dec - n2_mipbytes(s, 8), d3 = dec - n2_mipbytes(s, 16);
+        if (d1 < 0) d1 = -d1; if (d3 < 0) d3 = -d3;
+        if (d1 < bestd) { bestd = d1; side = s; dxt3 = 0; }
+        if (d3 < bestd) { bestd = d3; side = s; dxt3 = 1; }
+    }
+    if (side == 0 || bestd > 256) { free(raw); return 0; }
+    t->w = side; t->h = side;
+    t->rgb = (unsigned char *)malloc((long)side*side*3);
+    if (dxt3) n2_dxt3(raw, side, side, t->rgb); else n2_dxt1(raw, side, side, t->rgb);
+    free(raw);
+    return 1;
+}
+
 /* Load a car's main body texture from CARS/<car>/TEXTURES.BIN: parse the TPK
  * offset slots, take the largest (the 512x512 body atlas), JDLZ-decompress,
  * DXT3-decode. Approximation — one texture, no per-mesh binding. Returns 1. */
@@ -436,6 +534,53 @@ static int n2_load_texture(const unsigned char *d, long len, const char *name, N
             n2_dxt1(d + pix + off, w, hh, t->rgb);
             return 1;
         }
+    }
+    return 0;
+}
+
+/* Rough "is this decoded image just noise?" test: mean abs colour difference of
+ * horizontally-spaced sampled pixels. Real textures are locally coherent; a
+ * wrong format/swizzle decodes to high-frequency rainbow. Used to reject a
+ * texture we can't decode correctly (e.g. a swizzled surface) so it falls back
+ * instead of binding garbage. */
+static int n2_tex_noise(const N2Tex *t) {
+    long sum = 0, cnt = 0;
+    for (int y = 0; y < t->h; y += 4)
+        for (int x = 0; x + 4 < t->w; x += 4) {
+            const unsigned char *a = t->rgb + ((long)y*t->w + x)*3, *b = a + 12;
+            sum += abs(a[0]-b[0]) + abs(a[1]-b[1]) + abs(a[2]-b[2]); cnt++;
+        }
+    return cnt && (sum / (cnt*3)) > 55;
+}
+
+/* Decode a STREAM local-TPK texture by its 0x7c-record hash (@+0x18). Pixels
+ * live in the 0x33320002 sub-chunk; DXT1 vs DXT3 is inferred from the stored
+ * size (DXT3 base = W*H, DXT1 = W*H/2). Returns 1 on a decoded hit. */
+static int n2_load_stream_tex_by_hash(const unsigned char *d, long len, uint32_t hash, N2Tex *t) {
+    long hdr = -1;
+    for (long i = 0; i + 4 < len; i++)
+        if (d[i]==0 && d[i+1]==0 && d[i+2]==0x31 && d[i+3]==0xb3) { hdr = i; break; }
+    if (hdr < 0) return 0;
+    long hbeg = hdr + 8, hsize = n2_u32(d + hdr + 4);
+    long pbase = -1;                       /* pixel data = payload of 0x33320002 */
+    for (long i = hdr; i + 8 < len; i++)
+        if (n2_u32(d + i) == 0x33320002u) { pbase = i + 8; break; }
+    if (pbase < 0)                          /* fallback: raw 0xb3320000 payload */
+        for (long i = hdr; i + 4 < len; i++)
+            if (d[i]==0 && d[i+1]==0 && d[i+2]==0x32 && d[i+3]==0xb3) { pbase = i + 8; break; }
+    if (pbase < 0) return 0;
+    for (long i = hbeg; i + 0x3c < hbeg + hsize; i++) {
+        if (!(d[i] >= 'A' && d[i] <= 'Z')) continue;      /* record name start */
+        if (n2_u32(d + i + 0x18) != hash) continue;
+        uint32_t off = n2_u32(d + i + 0x24), sz = n2_u32(d + i + 0x2c);
+        int w = d[i+0x38] | d[i+0x39]<<8, hh = d[i+0x3a] | d[i+0x3b]<<8;
+        if (w<=0 || hh<=0 || w>4096 || hh>4096) continue;
+        if (pbase + off + (long)w*hh/2 > len) continue;
+        int dxt3 = (long)sz > (long)w*hh*9/10;            /* dxt3 base=W*H, dxt1=W*H/2 */
+        t->w = w; t->h = hh; t->rgb = (unsigned char *)malloc((long)w*hh*3);
+        if (dxt3) n2_dxt3(d + pbase + off, w, hh, t->rgb);
+        else      n2_dxt1(d + pbase + off, w, hh, t->rgb);
+        return 1;
     }
     return 0;
 }
