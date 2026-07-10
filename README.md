@@ -13,8 +13,10 @@ Portable across **x86 and ARM** (Linux, macOS, Windows; desktop OpenGL and
 OpenGL ES). In the spirit of OpenMW / OpenRW / OpenRCT2: **the engine is open
 source; you bring your own copy of the game.**
 
-> ⚠️ OpenUG contains **no game assets**. You need an original installation of
-> NFS: Underground 2 and point the engine at its data directory.
+> ⚠️ OpenUG contains **no game assets** and no EA code. You need a legally
+> acquired copy of NFS: Underground 2 and point the engine at its data
+> directory. Not affiliated with, authorized, or endorsed by Electronic Arts —
+> see [Legal Notice & Disclaimer](#legal-notice--disclaimer).
 
 ## Status
 
@@ -49,7 +51,12 @@ Needs **SDL2** and **zlib**.
 
 make                 # desktop build -> ./nfsu2
 make gles            # OpenGL ES 2.0 build (embedded/mobile ARM)
+make debug           # desktop build + Dear ImGui debug panel (dev only)
 ```
+
+`make debug` adds a live tuning overlay (Dear ImGui, vendored under
+`third_party/`): freecam, wheel placement, lighting, per-part visibility, paint,
+and readouts. It's dev-only — plain `make` ships without it.
 
 Cross-compiling for another ARM target is just the compiler swap, e.g.
 `CC=aarch64-linux-gnu-gcc make gles`.
@@ -84,16 +91,26 @@ load fresh; circuit is an in-place reload.)
 
 **Controls:** menu — `←`/`→` car, `↑`/`↓` track, `[`/`]` circuit, `Enter` race;
 driving — `W`/`S` throttle/brake, `A`/`D` steer, `Space` handbrake (breaks rear
-grip for drifts), `Esc` quit. Cars collide (they shove each other) and you can't
+grip for drifts), `F` freecam (WASD move · hold right-mouse or arrows to look ·
+`E`/`Q` up/down · `Shift` faster), `Esc` quit. Cars collide (they shove each
+other) and you can't
 drive through buildings — the car slides along wall footprints. `--shot out.png`
 renders one frame to a PNG and exits.
 
 ## Layout
 
 ```
-src/     the engine — a single-header asset loader (nfsu2.h) + SDL2/GL app (main.c)
+src/
+  main.c      orchestrator: setup, game loop, input, race flow, HUD
+  nfsu2.h     single-header asset parser (chunk formats — the ground truth)
+  render.*    Renderer: GL objects, shaders, matrices, bitmap font, screenshot
+  physics.*   car kinematics, wall + car-to-car collision
+  ai.*        racing-line opponents, circuit loading
+  audio.*     procedural engine/road/skid synth (no audio assets)
+  resource.*  file mapping + track/car/circuit discovery
+  debug.*     optional Dear ImGui dev overlay (`make debug`)
 tools/   Python utilities used to reverse-engineer & inspect the data formats
-docs/    format documentation
+docs/    format documentation + engine architecture brief (INIT.md)
 ```
 
 ## Contributing
@@ -117,8 +134,27 @@ Format reverse-engineering builds on prior community work, used as references
 
 See [`docs/FORMATS.md`](docs/FORMATS.md) for details.
 
-## Legal
+Bundled dependency (dev builds only): **[Dear ImGui](https://github.com/ocornut/imgui)**
+by Omar Cornut — MIT-licensed, vendored under `third_party/imgui/`.
 
-Unofficial and not affiliated with Electronic Arts. Ships engine code only, no
-assets. "Need for Speed: Underground 2" © Electronic Arts Inc. Engine code is
-MIT-licensed — see [`LICENSE`](LICENSE).
+## Legal Notice & Disclaimer
+
+OpenUG is an open-source, non-profit game engine recreation project built from
+scratch using OpenGL. It does not contain any copyrighted material, assets, or
+original code from Electronic Arts (EA). To run this engine, users must possess
+a legally acquired copy of Need for Speed Underground 2. "Need for Speed" and
+"Underground" are registered trademarks of Electronic Arts. This project is not
+affiliated with, authorized, or endorsed by Electronic Arts.
+
+The engine reads the formats of an existing game you already own, in the spirit
+of interoperability projects like OpenMW and OpenRW — it ships **no** game data
+(models, textures, audio, maps, or `speed2.exe`); you supply your own. All such
+files are excluded from the repository (see [`.gitignore`](.gitignore)).
+
+### Licensing
+
+- OpenUG engine code is **MIT-licensed** — see [`LICENSE`](LICENSE).
+- Bundled dependency **Dear ImGui** (dev builds only) is MIT-licensed — see
+  [`third_party/imgui/LICENSE.txt`](third_party/imgui/LICENSE.txt).
+- The reverse-engineering references credited above are independent third-party
+  projects; no code from them is copied here.

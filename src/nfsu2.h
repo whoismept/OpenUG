@@ -115,7 +115,8 @@ static int n2_mesh_category(const unsigned char *d, long beg, long end) {
  * (car, normal@12 uv@24). cull_skybox drops huge shells (tracks only). */
 static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
                         int cat, N2Scene *scene,
-                        int stride, int uvoff, int cull_skybox, uint32_t texkey) {
+                        int stride, int uvoff, int cull_skybox, uint32_t texkey,
+                        const float *mtx) {
     const unsigned char *vb = d + vtx.off;
     int vlen = (int)vtx.size;
     int pad = n2_skip_filler(vb, vlen);
@@ -142,11 +143,26 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
     m.cat = cat; m.texkey = texkey; m.nverts = n;
     m.verts = (float *)malloc(n * 5 * sizeof(float));
     for (int i = 0; i < n; i++) {
-        memcpy(m.verts + i*5,     rec + i*stride,          12);
-        memcpy(m.verts + i*5 + 3, rec + i*stride + uvoff,  8);
+        float px, py, pz;
+        memcpy(&px, rec+i*stride,   4);
+        memcpy(&py, rec+i*stride+4, 4);
+        memcpy(&pz, rec+i*stride+8, 4);
+        if (mtx) {   /* place local-space geometry into the world (track props) */
+            m.verts[i*5+0] = px*mtx[0]+py*mtx[4]+pz*mtx[8] +mtx[12];
+            m.verts[i*5+1] = px*mtx[1]+py*mtx[5]+pz*mtx[9] +mtx[13];
+            m.verts[i*5+2] = px*mtx[2]+py*mtx[6]+pz*mtx[10]+mtx[14];
+        } else { m.verts[i*5+0]=px; m.verts[i*5+1]=py; m.verts[i*5+2]=pz; }
+        memcpy(m.verts + i*5 + 3, rec + i*stride + uvoff, 8);
     }
-    const unsigned char *ib = d + idx.off;
-    int nidx = (int)idx.size / 2;
+    /* the index leaf carries the same 0x11 filler prefix as the vertex leaf
+       (as whole 0x1111 u16 words). Skipping it is essential: when the filler is
+       not a multiple of 6 bytes (e.g. 4 or 8), leaving it in shifts the triangle
+       grouping and shears every mesh — car wheels into urchins, buildings into
+       loose planes. */
+    const unsigned char *ib0 = d + idx.off; int ibytes = (int)idx.size, ip = 0;
+    while (ip + 2 <= ibytes && ib0[ip] == 0x11 && ib0[ip+1] == 0x11) ip += 2;
+    const unsigned char *ib = ib0 + ip;
+    int nidx = (ibytes - ip) / 2;
     m.idx = (uint16_t *)malloc(nidx * sizeof(uint16_t));
     m.nidx = 0;
     for (int i = 0; i + 2 < nidx; i += 3) {
@@ -183,6 +199,26 @@ static uint32_t n2_mesh_texkey_cat(const unsigned char *d, long beg, long end,
     return lastres ? lastres : last;
 }
 
+/* A 0x80134010 object's 4x4 world transform, from its 0x134011 header (after
+ * that header's own 0x11 filler): row-major, translation in row 3 (+0x40..+0x7f).
+ * Track props are modelled in local space and placed by this matrix — without it
+ * every building piles at the origin. Fills identity + returns 0 on miss. */
+static int n2_obj_matrix(const unsigned char *d, long beg, long end, float *m) {
+    for (int i = 0; i < 16; i++) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    N2Leaf h[2]; int nh = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, h, &nh, 2);
+    if (!nh) return 0;
+    const unsigned char *p = d + h[0].off; int s = (int)h[0].size;
+    int pad = n2_skip_filler(p, s);
+    if (pad + 0x40 + 64 > s) return 0;
+    for (int i = 0; i < 16; i++) memcpy(&m[i], p + pad + 0x40 + i*4, 4);
+    if (m[15] < 0.5f || m[15] > 1.5f) {          /* not a sane affine matrix */
+        for (int i = 0; i < 16; i++) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        return 0;
+    }
+    return 1;
+}
+
 /* Walk to every 0x80134010 mesh, classify it, extract its vtx/idx pairs. `keys`
  * is the set of texture keys resolvable for this region (local TPK + shared
  * pack), used to pick each mesh's diffuse slot. */
@@ -196,12 +232,13 @@ static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *
             int cat = n2_mesh_category(d, ds, ds + size);
             if (cat == N2_SKY) { o = ds + size; continue; }   /* drop the skybox by name */
             uint32_t tk = n2_mesh_texkey_cat(d, ds, ds + size, cat, keys, nkeys);
+            float objm[16]; n2_obj_matrix(d, ds, ds + size, objm);   /* world placement */
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + size, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + size, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
             for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1, tk);
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1, tk, objm);
         } else if (magic != 0 && (magic >> 28) == 8) {
             n2_walk_meshes(d, ds, ds + size, scene, keys, nkeys);
         }
@@ -243,6 +280,35 @@ static int n2_car_category(const unsigned char *d, long beg, long end) {
     return N2_CAR_MISC;
 }
 
+/* A car GEOMETRY.BIN holds EVERY customization part (stock body + all the body
+ * kits, styles and widebodies) overlaid. Rendering them all is a mess, so skip
+ * the alternates and keep only the stock config: drop STYLE*, KITW* (widebody)
+ * and KIT01..KIT99, keeping KIT00 and un-kitted shared parts. Returns 1 = skip. */
+static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
+    N2Leaf mat[4]; int nm = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
+    for (int k = 0; k < nm; k++) {
+        const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        for (long i = 0; i + 5 < s; i++) {
+            if (p[i] >= 'A' && p[i] <= 'Z') {
+                long j = i;
+                while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
+                if (j - i >= 5) {
+                    const unsigned char *n = p + i; long L = j - i;
+                    if (n2_contains(n,L,"STYLE") || n2_contains(n,L,"KITW")) return 1;
+                    for (long q = 0; q + 4 < L; q++)          /* KIT01..KIT99, not KIT00 */
+                        if (n[q]=='K'&&n[q+1]=='I'&&n[q+2]=='T'&&
+                            n[q+3]>='0'&&n[q+3]<='9'&&n[q+4]>='0'&&n[q+4]<='9'&&
+                            !(n[q+3]=='0'&&n[q+4]=='0')) return 1;
+                    return 0;
+                }
+                i = j;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Find this mesh's bound diffuse: scan its 0x134012 texture-slot list (8-byte
  * entries: key + 0) for a key present in the car's TPK (keys[]). 0 if none. */
 static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
@@ -269,14 +335,15 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
         uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
         long ds = o + 8;
         if (m == 0x80134010u) {
+            if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
             int cat = n2_car_category(d, ds, ds + s);
             uint32_t tk = n2_mesh_texkey(d, ds, ds + s, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + s, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
-            for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk);
+            for (int k = 0; k < pairs; k++)   /* car parts have identity transforms */
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk, NULL);
         } else if (m != 0 && (m >> 28) == 8) {
             n2_walk_car(d, ds, ds + s, scene, keys, nkeys);
         }
@@ -481,47 +548,6 @@ static int n2_load_car_tex_by_key(const unsigned char *d, long len, uint32_t key
     t->w = side; t->h = side;
     t->rgb = (unsigned char *)malloc((long)side*side*3);
     if (dxt3) n2_dxt3(raw, side, side, t->rgb); else n2_dxt1(raw, side, side, t->rgb);
-    free(raw);
-    return 1;
-}
-
-/* Load a car's main body texture from CARS/<car>/TEXTURES.BIN: parse the TPK
- * offset slots, take the largest (the 512x512 body atlas), JDLZ-decompress,
- * DXT3-decode. Approximation — one texture, no per-mesh binding. Returns 1. */
-static int n2_load_car_texture(const unsigned char *d, long len, N2Tex *t) {
-    /* container 0xb3300000 -> header 0xb3310000, pixel block 0xb3320000 */
-    long hoff = -1;
-    for (long i = 0; i + 4 < len; i++)
-        if (d[i]==0 && d[i+1]==0 && d[i+2]==0x31 && d[i+3]==0xb3) { hoff = i + 8; break; }
-    if (hoff < 0) return 0;
-    /* offset-slot table = 3rd info sub-chunk (0x33310003) inside the header block */
-    long o = hoff, p3 = -1; uint32_t hsz = n2_u32(d + hoff - 4);
-    long hend = hoff + hsz;
-    while (o + 8 <= hend) {
-        uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
-        if (m == 0x33310003u) { p3 = o + 8; break; }
-        o += 8 + s;
-    }
-    if (p3 < 0) return 0;
-    uint32_t p3sz = n2_u32(d + p3 - 4);
-    /* pick the slot with the largest DecodedSize */
-    long best_off = 0; int best_enc = 0, best_dec = 0;
-    for (uint32_t i = 0; i + 0x18 <= p3sz; i += 0x18) {
-        int absoff = (int)n2_u32(d + p3 + i + 4);
-        int enc = (int)n2_u32(d + p3 + i + 8);
-        int dec = (int)n2_u32(d + p3 + i + 12);
-        if (dec > best_dec && absoff >= 0 && absoff + enc <= len) {
-            best_dec = dec; best_enc = enc; best_off = absoff;
-        }
-    }
-    if (best_dec <= 0) return 0;
-    unsigned char *raw = (unsigned char *)malloc(best_dec);
-    int got = n2_jdlz(d + best_off, best_enc, raw, best_dec);
-    int W = 512, H = 512;             /* body atlas dims (from DecodedSize analysis) */
-    if (got < W*H) { free(raw); return 0; }
-    t->w = W; t->h = H;
-    t->rgb = (unsigned char *)malloc((long)W*H*3);
-    n2_dxt3(raw, W, H, t->rgb);
     free(raw);
     return 1;
 }

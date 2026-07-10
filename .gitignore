@@ -21,6 +21,7 @@ SafeMode.bat
 
 # --- Build output ---
 nfsu2
+build/
 *.o
 *.obj
 *.exe

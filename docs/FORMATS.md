@@ -3,6 +3,13 @@
 Reverse-engineered from the retail PC data files. Enough to load geometry,
 textures and racing lines. All integers are little-endian.
 
+> These are independent, clean-room notes on the *layout* of a game's data
+> files, produced for interoperability (reading data you already own), in the
+> spirit of OpenMW/OpenRW. They contain no Electronic Arts code and no game
+> assets. "Need for Speed" and "Underground" are trademarks of Electronic Arts;
+> this project is unaffiliated with and unendorsed by EA. See the README's
+> Legal Notice & Disclaimer.
+
 ## Chunk container (`.BIN` / `.BUN`)
 
 Every file is a flat stream of chunks:
