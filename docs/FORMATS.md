@@ -49,7 +49,21 @@ The big `STREAM*.BUN` files hold the visible world. The small per-region
 | scenery (STREAM) | **24 B** | `pos: f32[3]`, `color: u32 ARGB`, `uv: f32[2]` |
 | car parts        | **36 B** | `pos: f32[3]`, `normal: f32[3]`, `color: u32`, `uv: f32[2]` |
 
-Scenery positions are already world-space (no per-object transform needed).
+**Object placement matrix (`0x134011 +0x40`, verified 2026-07).** After the
+header's own `0x11` filler, offset `+0x40` holds a 4x4 `f32` world transform.
+Layout is the **D3D row-vector convention: basis rows at floats 0-2 / 4-6 /
+8-10, translation at floats 12-14, `m[15] == 1`** — byte-identical to an
+OpenGL column-major matrix, so the array is applied as-is
+(`world = v.x*m[0..2] + v.y*m[4..6] + v.z*m[8..10] + m[12..14]`), no
+transposition. Audited with `tools/props_audit.py` across L4RH + L4RB
+(2817 objects): road/terrain chunks carry an **identity** matrix (their
+vertices are already world-space); props/buildings (`XO_*`, `XB_*`, `XU_*`)
+carry a real placement (all 1094 rotations orthonormal to 1e-3; reading the
+transpose instead yields zero translation for every object, i.e. everything
+would pile at the origin). Every object has exactly **one** `0x134011`
+header, so one matrix per object is safe. Objects (props + skydome) can
+appear **twice** in a file with identical data — harmless to draw (equal
+depth), just redundant.
 
 **Submesh table (`0x134B02`).** 60-byte records, the index buffer consumed in
 order: `bbox_min: f32[3]`, `idx_count: u32`, `bbox_max: f32[3]`,
