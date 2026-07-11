@@ -172,7 +172,8 @@ int main(int argc, char **argv) {
     RProg rp = render_program();
     GLint uMVP = rp.uMVP, uUseTex = rp.uUseTex, uColor = rp.uColor,
           uUnlit = rp.uUnlit, uAlpha = rp.uAlpha, uSoft = rp.uSoft,
-          uSpec = rp.uSpec, uAmbient = rp.uAmbient, uDiffuse = rp.uDiffuse;
+          uSpec = rp.uSpec, uAmbient = rp.uAmbient, uDiffuse = rp.uDiffuse,
+          uLight = rp.uLight;
 
     GpuMesh *gm = upload_scene(&scene);
 
@@ -244,6 +245,10 @@ int main(int argc, char **argv) {
             N2Tex ct;
             if (n2_load_car_tex_by_key(ctdata, ctlen, tk, &ct)) {
                 mapkey[nmap] = tk; maptex[nmap] = upload_tex(&ct); nmap++;
+                /* car textures are atlases (UVs in [0,1]): clamp so REPEAT
+                   wrap + mip filtering can't bleed the opposite border in. */
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                 free(ct.rgb);
             }
         }
@@ -543,6 +548,7 @@ int main(int argc, char **argv) {
         glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP);
         glUniform1f(uUnlit, 0.0f); glUniform1f(uSpec, 0.0f);   /* world is matte */
         glUniform1f(uAmbient, g_dbg.ambient); glUniform1f(uDiffuse, g_dbg.diffuse);
+        glUniform3f(uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);   /* track = world space */
 
         /* track: each mesh wears its own bound texture (grass/road/props/sky);
            terrain without one falls back to the grass tex, everything else to
@@ -630,6 +636,11 @@ int main(int argc, char **argv) {
             mat_mul(T, Rz, Model);
             mat_mul(MVP, Model, MVPc);
             glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVPc);
+            /* normals stay model-space, so counter-rotate the sun into car
+               space — otherwise the lit side turns with the car's heading. */
+            { float ch=cosf(heading), sh=sinf(heading);
+              glUniform3f(uLight, ch*N2_SUN_X + sh*N2_SUN_Y,
+                                 -sh*N2_SUN_X + ch*N2_SUN_Y, N2_SUN_Z); }
             /* rebuild the 4 wheel placements from the (live-tunable) fractions */
             { float fr=carbb[3]*g_dbg.wheel_frontf, rr=carbb[0]*g_dbg.wheel_rearf,
                     tr=carbb[4]*g_dbg.wheel_trackf, s=g_dbg.wheel_scale, wz=g_dbg.wheel_z;
@@ -680,6 +691,9 @@ int main(int argc, char **argv) {
                 mat_mul(T, Rz, Model);
                 mat_mul(MVP, Model, MVPc);
                 glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVPc);
+                { float ch=cosf(ais[k].head), sh=sinf(ais[k].head);
+                  glUniform3f(uLight, ch*N2_SUN_X + sh*N2_SUN_Y,
+                                     -sh*N2_SUN_X + ch*N2_SUN_Y, N2_SUN_Z); }
                 glUniform3f(uColor, ais[k].col[0], ais[k].col[1], ais[k].col[2]);
                 for (int i = 0; i < ncar; i++)
                     if (cgm[i].cat != N2_CAR_TIRE) draw_gpumesh(&cgm[i]);
@@ -692,6 +706,7 @@ int main(int argc, char **argv) {
                 }
             }
             glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP);
+            glUniform3f(uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);   /* back to world */
         }
 
         /* tail lights: red camera-facing glows at each car's rear (night) */

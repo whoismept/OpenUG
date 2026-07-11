@@ -29,8 +29,14 @@ typedef struct { GLuint vbo, nbo, ibo; int nidx, cat; uint32_t texkey; } GpuMesh
 /* the one shader program + its uniform handles */
 typedef struct {
     GLuint prog;
-    GLint uMVP, uUseTex, uColor, uUnlit, uAlpha, uSoft, uSpec, uAmbient, uDiffuse;
+    GLint uMVP, uUseTex, uColor, uUnlit, uAlpha, uSoft, uSpec, uAmbient, uDiffuse,
+          uLight;   /* sun direction in the CURRENT object's model space */
 } RProg;
+
+/* world-space sun direction (night scene key light) */
+#define N2_SUN_X 0.4f
+#define N2_SUN_Y 0.7f
+#define N2_SUN_Z 0.6f
 
 /* ---- tiny 4x4 matrix (column-major) ---- */
 void mat_mul(const float *a, const float *b, float *o);

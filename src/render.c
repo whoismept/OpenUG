@@ -24,12 +24,15 @@ static const char *FS =
     GLSL_HEADER
     "varying vec2 vUV; varying vec3 vN; uniform sampler2D uTex;\n"
     "uniform float uUseTex; uniform vec3 uColor; uniform float uUnlit; uniform float uAlpha; uniform float uSoft; uniform float uSpec;\n"
-    "uniform float uAmbient; uniform float uDiffuse;\n"
+    "uniform float uAmbient; uniform float uDiffuse; uniform vec3 uLight;\n"
     "void main(){\n"
     "  if(uUnlit>0.5){ float a=uAlpha;\n"
     "    if(uSoft>0.5){ float d=length(vUV-vec2(0.5)); a*=clamp(1.0-d*2.0,0.0,1.0); a*=a; }\n"
     "    gl_FragColor=vec4(uColor,a); return; }\n"
-    "  vec3 L=normalize(vec3(0.4,0.7,0.6)); vec3 N=normalize(vN);\n"
+    /* uLight is the sun direction in the OBJECT's model space: normals stay
+       model-space (no per-vertex transform), so a rotated object (the car)
+       must counter-rotate the light or its lit side turns with it. */
+    "  vec3 L=normalize(uLight); vec3 N=normalize(vN);\n"
     "  float d=uAmbient+uDiffuse*max(dot(N,L),0.0);\n"   /* directional; reveals body form */
     "  vec3 base = uUseTex>0.5 ? texture2D(uTex,vUV).rgb : uColor;\n"
     "  float sp = pow(max(dot(N,L),0.0), 20.0)*uSpec;\n"       /* glossy sheen (car paint) */
@@ -127,7 +130,9 @@ RProg render_program(void) {
     r.uSpec    = glGetUniformLocation(r.prog, "uSpec");
     r.uAmbient = glGetUniformLocation(r.prog, "uAmbient");
     r.uDiffuse = glGetUniformLocation(r.prog, "uDiffuse");
+    r.uLight   = glGetUniformLocation(r.prog, "uLight");
     glUniform1f(r.uAlpha, 1.0f); glUniform1f(r.uSoft, 0.0f); glUniform1f(r.uSpec, 0.0f);
+    glUniform3f(r.uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);
     return r;
 }
 
