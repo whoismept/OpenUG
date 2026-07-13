@@ -7,12 +7,18 @@
 #include "nfsu2.h"
 #include "ai.h"
 
-/* driving constants — car length axis = local X; world +Z up */
-#define PHYS_ACCEL    0.3f     /* throttle impulse per tick */
-#define PHYS_MAXSPD   4.5f     /* forward speed cap (world units/tick) */
-#define PHYS_FRICTION 0.95f    /* per-tick velocity decay */
-#define PHYS_TURN     0.045f   /* steering rate at full authority */
+/* driving constants — car length axis = local X; world +Z up.
+ * Real units: world coordinates are metres, physics ticks at 60 Hz, so
+ * speeds are metres/tick. Tuned to NFSU2 driving: ~220 km/h top speed,
+ * 0-100 km/h in ~4 s, ~100-0 braking in ~3 s, long pull to top speed. */
+#define PHYS_TICKRATE 60.0f
+#define PHYS_MAXSPD   (61.0f/PHYS_TICKRATE)   /* 220 km/h cap (m/tick) */
+#define PHYS_ACCEL    (7.0f/(PHYS_TICKRATE*PHYS_TICKRATE)) /* 7 m/s^2 peak thrust */
+#define PHYS_FRICTION 0.99886f /* rolling+air drag; equilibrium lands at MAXSPD */
+#define PHYS_TURN     0.045f   /* steering rate at full authority (rad/tick) */
 #define PHYS_GRIP     0.86f    /* lateral scrub per tick (lower = grippier) */
+/* km/h for the HUD from a m/tick forward speed */
+#define PHYS_KMH(v)   ((v) * PHYS_TICKRATE * 3.6f)
 
 /* One tick of car kinematics: throttle in [-1..1] along the heading, steering
  * in [-1..1] rotates it, tyres scrub the sideways velocity (handbrake keeps
@@ -26,6 +32,7 @@ float phys_car_step(float pos[3], float vel[2], float *heading, float *speed,
  * the face. Returns the number of walls resolved. */
 int collide_walls(float *pos, float *vel, const float obst[][4], int nobst, float r);
 void collide_walls_selftest(void);
+void phys_selftest(void);   /* asserts the NFSU2 velocity tuning targets */
 
 /* Collect building collision footprints: the 2D (XY) bounding box of every
  * tall N2_OTHER mesh. Flat props/signs/road paint are skipped so they don't

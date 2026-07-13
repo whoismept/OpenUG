@@ -28,6 +28,7 @@
 #include "ai.h"
 #include "audio.h"
 #include "resource.h"
+#include "world.h"
 #include "debug.h"
 
 /* debug tunables — defaults match the previously hard-coded constants, so a
@@ -44,15 +45,16 @@ DbgState g_dbg = {
 
 int main(int argc, char **argv) {
     collide_walls_selftest();
+    phys_selftest();
     /* Point at your own NFSU2 install/data directory (contains TRACKS/, CARS/).
        Usage: nfsu2 [DATA_DIR] [options]
          --car NAME       car folder under CARS/ (default HUMMER)
-         --track NAME     STREAM .BUN under TRACKS/ (default STREAML4RH)
+         --track NAME     STREAM .BUN under TRACKS/, or ALL = whole city (default)
          --circuit PATH   circuit Paths .bin under TRACKS/ (default ROUTESL4RF/Paths4602.bin)
          --shot out.png   render one frame and exit */
     const char *selfexe = argv[0];   /* for the menu's track-switch re-exec */
     const char *dataroot = ".", *shot = NULL;
-    const char *carname = "HUMMER", *trackname = "STREAML4RH";
+    const char *carname = "HUMMER", *trackname = "ALL";
     const char *circuit = "ROUTESL4RF/Paths4602.bin"; int explicit_circuit = 0;
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--shot")    && i+1 < argc) shot      = argv[++i];
@@ -61,45 +63,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--circuit") && i+1 < argc) { circuit = argv[++i]; explicit_circuit = 1; }
         else dataroot = argv[i];
     }
-    char trackp[1024], carp[1024], cartexp[1024], pathp[1024];
-    snprintf(trackp,  sizeof trackp,  "%s/TRACKS/%s.BUN", dataroot, trackname);
+    char carp[1024], cartexp[1024], pathp[1024], troot[1024];
+    snprintf(troot,   sizeof troot,   "%s/TRACKS", dataroot);
     snprintf(carp,    sizeof carp,    "%s/CARS/%s/GEOMETRY.BIN", dataroot, carname);
     snprintf(cartexp, sizeof cartexp, "%s/CARS/%s/TEXTURES.BIN", dataroot, carname);
     snprintf(pathp,   sizeof pathp,   "%s/TRACKS/%s", dataroot, circuit);
 
-    long len; unsigned char *data = n2_read_file(trackp, &len);
-    if (!data) { fprintf(stderr, "cannot read %s\n  (pass your NFSU2 data dir: nfsu2 /path/to/data)\n", trackp); return 1; }
-
-    /* resolvable texture keys for this region = local STREAM TPK record hashes
-       + shared LOC4DYNTEX keys + a shared "master" region's TPK (small regions
-       reference buildings whose textures live in a big neighbour — the master
-       is mmap'd so only the touched pages load). Used to pick each mesh's
-       diffuse slot and (later) to decode the textures. */
-    char loc4p[1024]; snprintf(loc4p, sizeof loc4p, "%s/TRACKS/LOC4DYNTEX.BIN", dataroot);
-    long loc4len; unsigned char *loc4 = n2_read_file(loc4p, &loc4len);
-    /* Location-4 shared texture library; use the other big region if we ARE it. */
-    /* Only mid-size regions need it: tiny proxies (<8MB) self-contain their
-       textures, and the huge master regions (>60MB) already carry their own. */
-    const char *mastername = strcmp(trackname, "STREAML4RD") ? "STREAML4RD" : "STREAML4RA";
-    char masterp[1024]; snprintf(masterp, sizeof masterp, "%s/TRACKS/%s.BUN", dataroot, mastername);
-    long masterlen = 0; unsigned char *master = NULL;
-    if (len > 8L*1024*1024 && len < 60L*1024*1024) master = res_map_file(masterp, &masterlen);
-    N2Tpk localtpk = n2_tpk_open(data, len);
-    N2Tpk mastertpk = {0};
-    static uint32_t tkeys[16384]; int ntk = n2_tpk_keys(data, localtpk, tkeys, 16384);
-    if (loc4 && ntk < 16384) ntk += n2_car_tex_keys(loc4, loc4len, tkeys + ntk, 16384 - ntk);
-    if (master) {
-        mastertpk = n2_tpk_open(master, masterlen);
-        if (ntk < 16384) ntk += n2_tpk_keys(master, mastertpk, tkeys + ntk, 16384 - ntk);
-    }
-    printf("texture keyset: %d (local+LOC4%s)\n", ntk, master ? "+master" : "");
-
-    N2Scene scene;
-    int nm = n2_load_scene(data, len, &scene, tkeys, ntk);
-    printf("loaded %d submeshes from %s\n", nm, trackp);
-    N2Tex grass;
-    int have_grass = n2_load_texture(data, len, "TRN_GRASSC", &grass);
-    printf("terrain texture TRN_GRASSC: %s\n", have_grass ? "ok" : "-");
+    static World world;
+    int nm = world_load(&world, troot, trackname);
+    if (!nm) { fprintf(stderr, "no track data\n  (pass your NFSU2 data dir: nfsu2 /path/to/data)\n"); return 1; }
+    N2Scene scene = world.scene;   /* shares world.scene.meshes */
+    printf("loaded %d submeshes from %d region(s)\n", nm, world.nreg);
+    printf("terrain texture TRN_GRASSC: %s\n", world.have_grass ? "ok" : "-");
     int nroad = 0, nterr = 0;
     for (int i = 0; i < nm; i++) {
         if (scene.meshes[i].cat == N2_ROAD) nroad++;
@@ -143,7 +118,7 @@ int main(int argc, char **argv) {
     printf("dense build-up centre: (%.0f,%.0f)\n", densx, densy);
 
     /* building collision footprints — the car is kept out of these */
-    #define MAXOBST 8192
+    #define MAXOBST 32768   /* whole city worth of building footprints */
     static float obst[MAXOBST][4];
     int nobst = phys_collect_walls(&scene, obst, MAXOBST);
     printf("collision obstacles: %d buildings\n", nobst);
@@ -164,7 +139,7 @@ int main(int argc, char **argv) {
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
     if (!ctx) { fprintf(stderr, "GL ctx: %s\n", SDL_GetError()); return 1; }
-    SDL_GL_SetSwapInterval(1);
+    SDL_GL_SetSwapInterval(shot ? 0 : 1);   /* raw frame times in shot mode */
 #ifdef DEBUG_UI
     dbgui_init(win, ctx);
 #endif
@@ -183,20 +158,22 @@ int main(int argc, char **argv) {
        that decode to noise (wrong format / swizzled surface), map key->GL tex.
        Generalises the old hard-coded TRN_GRASSC/RDP_PARKING lookup across
        regions (L4RR uses ORG_GRASS_001 etc.). */
-    static uint32_t tmapkey[512]; static GLuint tmaptex[512]; int ntmap = 0;
-    for (int i = 0; i < nm; i++) {
-        uint32_t tk = scene.meshes[i].texkey; if (!tk) continue;
-        int seen = 0; for (int j = 0; j < ntmap; j++) if (tmapkey[j]==tk) seen = 1;
-        if (seen || ntmap >= 512) continue;
-        N2Tex tt; int ok = n2_tpk_decode(data, len, localtpk, tk, &tt);
-        if (!ok && loc4) ok = n2_load_car_tex_by_key(loc4, loc4len, tk, &tt);
-        if (!ok && master) ok = n2_tpk_decode(master, masterlen, mastertpk, tk, &tt);
-        if (ok && !n2_tex_noise(&tt)) {
-            tmapkey[ntmap] = tk; tmaptex[ntmap] = upload_tex(&tt); ntmap++;
-        }
-        if (ok) free(tt.rgb);
-    }
+    static uint32_t tmapkey[2048]; static GLuint tmaptex[2048];
+    int ntmap = world_bind_textures(&world, tmapkey, tmaptex, 2048);
     printf("track textures bound: %d distinct\n", ntmap);
+    /* resolve each mesh's texture once — the per-frame key scan was fine for
+       one region, not for a whole city of meshes */
+    GLuint *mtex = (GLuint *)calloc(nm, sizeof *mtex);
+    for (int i = 0; i < nm; i++)
+        for (int j = 0; j < ntmap; j++)
+            if (tmapkey[j] == scene.meshes[i].texkey) { mtex[i] = tmaptex[j]; break; }
+    /* draw order grouped by texture: one GL bind per texture run, not per mesh */
+    int *order = (int *)malloc(nm * sizeof *order);
+    { int k = 0;
+      for (int j = 0; j <= ntmap; j++) {              /* j==ntmap: untextured */
+        GLuint want = j < ntmap ? tmaptex[j] : 0;
+        for (int i = 0; i < nm; i++) if (mtex[i] == want) order[k++] = i;
+      } }
 
     /* load a car and drop it on the track (36-byte vertex format) */
     long clen; unsigned char *cdata = n2_read_file(carp, &clen);
@@ -267,16 +244,19 @@ int main(int argc, char **argv) {
                ncar, spawn[0], spawn[1], heading0);
     }
 
-    char troot[1024]; snprintf(troot, sizeof troot, "%s/TRACKS", dataroot);
-
     /* Enumerate the selectable assets for the pre-race menu. Switching car or
        track means a whole new load, so those re-launch the process (below);
        circuit is a cheap in-place reload. */
-    #define MAXTRACK 16
+    #define MAXTRACK WORLD_MAXREG
     #define MAXCARS  64
     #define MAXCIRC  24
     char tracklist[MAXTRACK][64]; int seltrack = 0;
     int ntrack = res_list_tracks(troot, tracklist, MAXTRACK, trackname, &seltrack);
+    if (ntrack < MAXTRACK) {   /* city mode is selectable from the menu too */
+        snprintf(tracklist[ntrack], sizeof tracklist[0], "ALL");
+        if (!strcmp(trackname, "ALL")) seltrack = ntrack;
+        ntrack++;
+    }
     char carlist[MAXCARS][64]; int selcar = 0;
     int ncars = res_list_cars(dataroot, carlist, MAXCARS, carname, &selcar);
     char circlist[MAXCIRC][256]; int selcirc = 0;
@@ -292,7 +272,7 @@ int main(int argc, char **argv) {
     if (nai) printf("circuit: %d-waypoint loop; %d AI racers, lap system on\n",
                     aipath.n, nai);
 
-    GLuint texTerr = have_grass ? upload_tex(&grass) : 0;
+    GLuint texTerr = world.have_grass ? upload_tex(&world.grass) : 0;
 
     /* unit-quad for the 2D HUD (drawn in NDC via uMVP) */
     GpuMesh quad = make_quad();
@@ -324,6 +304,7 @@ int main(int argc, char **argv) {
     int race_state = shot ? 1 : 3, racetimer = 0, finish_place = 0;
     float menuspin = 0.0f;   /* orbit-camera angle on the menu screen */
     int running = 1, shotframe = 0;
+    uint32_t t0 = SDL_GetTicks();   /* --shot prints avg ms/frame at exit */
     /* tyre skid marks: a ring buffer of oriented ground SEGMENTS (ax,ay,az,
        bx,by,bz, life) — life starts at 1 and decays so marks fade over time.
        bx,by,bz) forming continuous ribbons; plus drift smoke particles. */
@@ -391,7 +372,7 @@ int main(int argc, char **argv) {
                            start line so the race itself is fair. */
                         if (aipath.n > 0) {
                             carpos[0]=aipath.xy[start_idx*2]; carpos[1]=aipath.xy[start_idx*2+1];
-                            carpos[2]=n2_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
+                            carpos[2]=world_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
                             int nx=(start_idx+1)%aipath.n;
                             heading=atan2f(aipath.xy[nx*2+1]-carpos[1], aipath.xy[nx*2]-carpos[0]);
                             vel[0]=vel[1]=0; speed=0;
@@ -449,13 +430,14 @@ int main(int argc, char **argv) {
         /* building collision: push the car out of any wall footprint it entered.*/
         if (race_state == 1 && collide_walls(carpos, vel, obst, nobst, 1.3f)) g_hit = 0.5f;
         /* sit on the road/terrain surface (smoothed to avoid jitter) */
-        float gz = n2_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
+        float gz = world_ground_z(&scene, carpos[0], carpos[1], carpos[2]);
         carpos[2] += (gz - carpos[2]) * 0.35f;
 
         /* drifting? extend the tyre ribbons + puff smoke at the rear wheels */
-        int drifting = (dmag > 0.9f && speed > 1.0f);
+        int drifting = (dmag > PHYS_MAXSPD*0.2f && speed > PHYS_MAXSPD*0.22f);
         /* tyre screech scales with how hard the back is sliding */
-        g_skid = (race_state==1 && drifting) ? (0.12f + 0.10f*(dmag-0.9f)) : 0.0f;
+        g_skid = (race_state==1 && drifting)
+               ? (0.12f + 0.45f*(dmag - PHYS_MAXSPD*0.2f)/PHYS_MAXSPD) : 0.0f;
         if (g_skid > 0.35f) g_skid = 0.35f;
         if (drifting) {
             float rx = carpos[0]-nf[0]*1.6f, ry = carpos[1]-nf[1]*1.6f, rz = carpos[2]+0.05f;
@@ -540,9 +522,11 @@ int main(int argc, char **argv) {
         glClearColor(0.06f, 0.07f, 0.11f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float P[16], V[16], MVP[16];
-        /* menu orbits ~9m from the car, so use a close near-plane there;
-           big regions otherwise push maxr*0.01 past the car and clip it. */
-        mat_persp(0.9f, (float)W/H, race_state==3 ? 0.2f : maxr*0.01f, maxr*30, P);
+        /* menu orbits ~9m from the car, so use a close near-plane there; the
+           driving near scales with region size but is clamped so a whole-city
+           maxr can't push it past the car and clip it. */
+        float znear = race_state==3 ? 0.2f : (maxr*0.01f < 1.0f ? maxr*0.01f : 1.0f);
+        mat_persp(0.9f, (float)W/H, znear, maxr*30, P);
         mat_lookat(cam, look, V);
         mat_mul(P, V, MVP);
         glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP);
@@ -553,12 +537,29 @@ int main(int argc, char **argv) {
         /* track: each mesh wears its own bound texture (grass/road/props/sky);
            terrain without one falls back to the grass tex, everything else to
            flat asphalt (e.g. a region's road texture that didn't decode). */
-        for (int i = 0; g_dbg.show_track && i < nm; i++) {
-            GLuint tex = 0;
-            for (int j = 0; j < ntmap; j++) if (tmapkey[j]==gm[i].texkey) { tex = tmaptex[j]; break; }
+        /* cull: skip meshes beyond the view range or too small on screen.
+           ponytail: XY distance + size only, no frustum test — add one if the
+           draw count is still the bottleneck. */
+        #define VIEW_DIST 700.0f
+        int ndrawn = 0;
+        GLuint lasttex = (GLuint)-1;
+        for (int k = 0; g_dbg.show_track && k < nm; k++) {
+            int i = order[k];
+            float *b = world.mbb[i];
+            float dx = cam[0] < b[0] ? b[0]-cam[0] : (cam[0] > b[2] ? cam[0]-b[2] : 0);
+            float dy = cam[1] < b[1] ? b[1]-cam[1] : (cam[1] > b[3] ? cam[1]-b[3] : 0);
+            float d2 = dx*dx + dy*dy;
+            if (d2 > VIEW_DIST*VIEW_DIST) continue;
+            float rw = b[2]-b[0], rh = b[3]-b[1], r2 = 0.25f*(rw*rw + rh*rh);
+            if (r2 < d2 * 6.0e-5f) continue;   /* under ~0.8% of view: invisible */
+            ndrawn++;
+            GLuint tex = mtex[i];
             if (!tex && gm[i].cat == N2_TERRAIN) tex = texTerr;
-            if (tex) { glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, tex); }
-            else { glUniform1f(uUseTex, 0.0f); glUniform3f(uColor, 0.28f, 0.29f, 0.31f); }
+            if (tex != lasttex) {   /* texture-sorted order: binds are rare */
+                if (tex) { glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, tex); }
+                else { glUniform1f(uUseTex, 0.0f); glUniform3f(uColor, 0.28f, 0.29f, 0.31f); }
+                lasttex = tex;
+            }
             draw_gpumesh(&gm[i]);
         }
 
@@ -572,7 +573,7 @@ int main(int argc, char **argv) {
             glUniform3f(uColor, 0.0f, 0.0f, 0.0f); glUniform1f(uAlpha, 0.5f);
             for (int c=0; c<=nai; c++) {
                 float *cp = c==0 ? carpos : ais[c-1].pos;
-                float gz2 = n2_ground_z(&scene, cp[0], cp[1], cp[2]) + 0.03f, sz=3.2f;
+                float gz2 = world_ground_z(&scene, cp[0], cp[1], cp[2]) + 0.03f, sz=3.2f;
                 float M[16]={sz,0,0,0, 0,sz,0,0, 0,0,1,0, cp[0]-sz*0.5f, cp[1]-sz*0.5f, gz2, 1};
                 float MV[16]; mat_mul(MVP,M,MV);
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MV); draw_gpumesh(&quad);
@@ -593,7 +594,7 @@ int main(int argc, char **argv) {
             for (int s=0;s<3;s++){
                 float dist=3.0f+s*3.5f, size=3.0f+s*2.4f;
                 float px=carpos[0]+fx*dist, py=carpos[1]+fy*dist;
-                float pz=n2_ground_z(&scene,px,py,carpos[2])+0.06f;
+                float pz=world_ground_z(&scene,px,py,carpos[2])+0.06f;
                 float M[16]={size,0,0,0, 0,size,0,0, 0,0,1,0, px-size*0.5f, py-size*0.5f, pz, 1};
                 float MV[16]; mat_mul(MVP, M, MV);
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MV);
@@ -821,7 +822,7 @@ int main(int argc, char **argv) {
                 draw_text(&quad, uMVP, buf, -text_width(buf,0.024f)/2, 0.96f, 0.024f, 0.036f);
                 snprintf(buf,sizeof buf,"LAP %d/%d", p_lap<LAP_TARGET?p_lap+1:LAP_TARGET, LAP_TARGET);
                 draw_text(&quad, uMVP, buf, -0.97f, -0.80f, 0.018f, 0.028f);
-                int kph = (int)((speed<0?-speed:speed)/PHYS_MAXSPD*200.0f);
+                int kph = (int)PHYS_KMH(speed<0?-speed:speed);
                 snprintf(buf,sizeof buf,"%d", kph);
                 glUniform3f(uColor,0.3f,0.85f,1.0f);
                 draw_text(&quad, uMVP, buf, 0.58f, -0.80f, 0.02f, 0.03f);
@@ -919,7 +920,7 @@ int main(int argc, char **argv) {
 #ifdef DEBUG_UI     /* debug readouts + ImGui overlay, drawn on top of everything */
         g_dbg.cam[0]=cam[0]; g_dbg.cam[1]=cam[1]; g_dbg.cam[2]=cam[2];
         g_dbg.car[0]=carpos[0]; g_dbg.car[1]=carpos[1]; g_dbg.car[2]=carpos[2];
-        g_dbg.heading=heading; g_dbg.kmh=speed*3.6f;
+        g_dbg.heading=heading; g_dbg.kmh=PHYS_KMH(speed);
         g_dbg.car_meshes=ncar; g_dbg.track_meshes=nm;
         dbgui_frame();
         dbgui_render();
@@ -930,6 +931,8 @@ int main(int argc, char **argv) {
             for (int y = 0; y < H; y++) memcpy(fl+(size_t)y*W*3, px+(size_t)(H-1-y)*W*3, W*3);
             write_png(shot, W, H, fl);
             free(px); free(fl);
+            printf("frame avg: %.1f ms (vsync on), %d/%d meshes drawn\n",
+                   (SDL_GetTicks()-t0)/(float)shotframe, ndrawn, nm);
             printf("wrote %s (%dx%d) after driving to (%.0f,%.0f)\n", shot, W, H, carpos[0], carpos[1]);
             running = 0;
         }
@@ -939,8 +942,7 @@ int main(int argc, char **argv) {
 #ifdef DEBUG_UI
     dbgui_shutdown();
 #endif
-    n2_free_scene(&scene);
-    free(data);
+    n2_free_scene(&scene);   /* region buffers already freed after texture upload */
     if (adev) SDL_CloseAudioDevice(adev);
     SDL_GL_DeleteContext(ctx); SDL_DestroyWindow(win); SDL_Quit();
     return 0;

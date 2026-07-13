@@ -6,29 +6,39 @@
 
 /* handbrake: rear grip lets go, the lateral velocity survives → drift */
 #define HANDBRAKE_GRIP   0.985f
-#define REVERSE_SPD_FRAC 0.4f    /* reverse cap as a fraction of MAXSPD */
-#define REVERSE_ACCEL    0.7f    /* brake/reverse throttle vs forward */
+#define REVERSE_SPD_FRAC 0.2f    /* reverse cap ~45 km/h */
+#define REVERSE_ACCEL    0.7f    /* reverse thrust vs forward */
+#define BRAKE_ACCEL      1.5f    /* braking vs forward thrust: ~10 m/s^2 */
+#define COAST_DRAG       0.9994f /* off-throttle engine braking on top of drag */
 /* turn authority ramps in by ~35% of top speed then holds — responsive from
  * low speed without getting twitchy/spinny flat out. */
 #define TURN_RAMP_FRAC   0.35f
+/* ...and eases off toward top speed so 200+ km/h stays stable (NFSU2 cars
+ * corner tight at city speed, wide at full tilt) */
+#define TURN_HISPD_DROP  0.55f
 
 float phys_car_step(float pos[3], float vel[2], float *heading, float *speed,
                     float throttle, float steer, int handbrake) {
     float hf[2] = { cosf(*heading), sinf(*heading) };
+    float fwd = vel[0]*hf[0] + vel[1]*hf[1];   /* signed forward speed */
     if (throttle > 0) {
         /* throttle tapers as speed builds: punchy off the line, eases near top */
         float sp = *speed < 0 ? -*speed : *speed;
         float a = PHYS_ACCEL * (1.15f - 0.55f*sp/PHYS_MAXSPD) * throttle;
         vel[0] += hf[0]*a; vel[1] += hf[1]*a;
     } else if (throttle < 0) {
-        vel[0] += hf[0]*PHYS_ACCEL*REVERSE_ACCEL*throttle;
-        vel[1] += hf[1]*PHYS_ACCEL*REVERSE_ACCEL*throttle;
+        /* moving forward = brakes (strong); at rest / rolling back = reverse */
+        float a = PHYS_ACCEL * (fwd > 0.01f ? BRAKE_ACCEL : REVERSE_ACCEL);
+        vel[0] += hf[0]*a*throttle; vel[1] += hf[1]*a*throttle;
+    } else {
+        vel[0] *= COAST_DRAG; vel[1] *= COAST_DRAG;
     }
     vel[0] *= PHYS_FRICTION; vel[1] *= PHYS_FRICTION;
     float spd = sqrtf(vel[0]*vel[0]+vel[1]*vel[1]);
     float dir = (vel[0]*hf[0]+vel[1]*hf[1]) < 0 ? -1.f : 1.f;  /* fwd vs reverse */
     float sfac = spd/(PHYS_MAXSPD*TURN_RAMP_FRAC); if (sfac > 1) sfac = 1;
-    *heading += steer * PHYS_TURN * sfac * dir;
+    float hifrac = spd/PHYS_MAXSPD; if (hifrac > 1) hifrac = 1;
+    *heading += steer * PHYS_TURN * sfac * (1.0f - TURN_HISPD_DROP*hifrac) * dir;
     /* decompose velocity in the new heading frame, clamp forward, scrub side */
     float nf[2] = { cosf(*heading), sinf(*heading) }, nr[2] = { nf[1], -nf[0] };
     float vf = vel[0]*nf[0]+vel[1]*nf[1], vl = vel[0]*nr[0]+vel[1]*nr[1];
@@ -39,6 +49,27 @@ float phys_car_step(float pos[3], float vel[2], float *heading, float *speed,
     *speed = vf;                      /* forward speed, for HUD/collision */
     pos[0] += vel[0]; pos[1] += vel[1];
     return vl < 0 ? -vl : vl;         /* drift magnitude */
+}
+
+void phys_selftest(void) {
+    /* the NFSU2 tuning targets, asserted: 0-100 in 3-6 s, top ~220 km/h,
+       100-0 braking well under 5 s */
+    float pos[3]={0,0,0}, vel[2]={0,0}, h=0, spd=0;
+    int t100 = -1;
+    for (int t = 1; t <= 60*60; t++) {
+        phys_car_step(pos, vel, &h, &spd, 1.0f, 0, 0);
+        if (t100 < 0 && PHYS_KMH(spd) >= 100.0f) t100 = t;
+    }
+    assert(t100 > 2*60 && t100 < 6*60);
+    assert(PHYS_KMH(spd) > 200.0f && PHYS_KMH(spd) < 232.0f);
+    /* brake from ~100 km/h */
+    vel[0] = cosf(h)*100.0f/3.6f/PHYS_TICKRATE; vel[1] = sinf(h)*100.0f/3.6f/PHYS_TICKRATE;
+    int tstop = -1;
+    for (int t = 1; t <= 8*60 && tstop < 0; t++) {
+        phys_car_step(pos, vel, &h, &spd, -1.0f, 0, 0);
+        if (spd <= 0.0f) tstop = t;
+    }
+    assert(tstop > 0 && tstop < 5*60);
 }
 
 int collide_walls(float *pos, float *vel, const float obst[][4], int nobst, float r) {

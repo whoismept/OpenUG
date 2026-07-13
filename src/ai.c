@@ -6,6 +6,7 @@
 
 #include "ai.h"
 #include "physics.h"   /* PHYS_MAXSPD paces the AI against the player's cap */
+#include "world.h"     /* grid-accelerated ground query */
 
 int load_circuit(const char *dataroot, const char *circuit, N2Scene *scene,
                  N2Path *aipath, AiCar *ais, float spawn[3],
@@ -31,7 +32,7 @@ int load_circuit(const char *dataroot, const char *circuit, N2Scene *scene,
     }
     *start_idx = best;
     spawn[0]=cx; spawn[1]=cy;
-    spawn[2]=n2_ground_z(scene, cx, cy, spawn[2]);
+    spawn[2]=world_ground_z(scene, cx, cy, spawn[2]);
     float dwx = aipath->xy[best*2]-cx, dwy = aipath->xy[best*2+1]-cy;
     if (dwx*dwx+dwy*dwy < 9.0f) {                 /* already on the line: face along it */
         int nx = (best+1) % aipath->n;
@@ -44,7 +45,7 @@ int load_circuit(const char *dataroot, const char *circuit, N2Scene *scene,
         ais[k].t = t; ais[k].lap = 0; ais[k].prevrel = t;
         ais[k].pos[0]=aipath->xy[t*2]; ais[k].pos[1]=aipath->xy[t*2+1];
         ais[k].pos[2]=spawn[2]; ais[k].head=*heading0;
-        ais[k].spd = 3.0f + k*0.12f;
+        ais[k].spd = PHYS_MAXSPD*(0.66f + k*0.027f);
         memcpy(ais[k].col, AICOL[k], sizeof AICOL[k]);
     }
     return N_AI;
@@ -76,10 +77,10 @@ void ai_step(AiCar *ai, int k, const N2Path *aipath, N2Scene *scene,
     if (gap>1) gap=1; if (gap<-1) gap=-1;             /* + = AI behind -> faster */
     float target = PHYS_MAXSPD*(0.68f + k*0.015f) * corner * (1.0f + 0.18f*gap);
     ai->spd += (target - ai->spd) * 0.06f;
-    if (ai->spd < 0.5f) ai->spd = 0.5f;
+    if (ai->spd < PHYS_MAXSPD*0.11f) ai->spd = PHYS_MAXSPD*0.11f;
     ai->pos[0] += cosf(ai->head)*ai->spd;
     ai->pos[1] += sinf(ai->head)*ai->spd;
-    float agz = n2_ground_z(scene, ai->pos[0], ai->pos[1], ai->pos[2]);
+    float agz = world_ground_z(scene, ai->pos[0], ai->pos[1], ai->pos[2]);
     ai->pos[2] += (agz - ai->pos[2]) * 0.35f;
     /* lap: count when loop-progress wraps past the start/finish */
     int rel = (n2_nearest_wp(aipath, ai->pos[0], ai->pos[1]) - start_idx
