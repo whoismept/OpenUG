@@ -14,7 +14,7 @@
 enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2, N2_SKY = 3,
        /* car mesh classes, from material name */
        N2_CAR_BODY = 10, N2_CAR_GLASS = 11, N2_CAR_LIGHT = 12,
-       N2_CAR_TIRE = 13, N2_CAR_MISC = 14, N2_CAR_BRAKELIGHT = 15 };
+       N2_CAR_TIRE = 13, N2_CAR_MISC = 14, N2_CAR_BRAKELIGHT = 15, N2_CAR_MECH = 16 };
 typedef struct {
     float   *verts;   /* 5 floats per vertex: pos.xyz, uv */
     int      nverts;
@@ -277,6 +277,15 @@ static int n2_car_category(const unsigned char *d, long beg, long end) {
                     if (n2_contains(n,L,"BRAKE") && n2_contains(n,L,"LIGHT"))  return N2_CAR_BRAKELIGHT;
                     if (n2_contains(n,L,"LIGHT") || n2_contains(n,L,"LAMP"))   return N2_CAR_LIGHT;
                     if (n2_contains(n,L,"TIRE") || n2_contains(n,L,"WHEEL"))   return N2_CAR_TIRE;
+                    /* mechanical compartment detail (engine bay, exhaust pipe):
+                       unpainted metal/plastic, not glossy body shell — checked
+                       before the generic KIT/BODY catch-all below, since these
+                       names also contain "KIT##" and would otherwise match it.
+                       Parts that already carry their own texture (e.g. GOLF's
+                       engine bay atlas) still use it unchanged; this only
+                       changes the flat-colour FALLBACK for cars where the part
+                       has no texture of its own (e.g. Miata's engine bay). */
+                    if (n2_contains(n,L,"ENGINE") || n2_contains(n,L,"EXHAUST")) return N2_CAR_MECH;
                     if (n2_contains(n,L,"BASE") || n2_contains(n,L,"BODY") ||
                         n2_contains(n,L,"KIT")  || n2_contains(n,L,"STYLE"))   return N2_CAR_BODY;
                     return N2_CAR_MISC;
@@ -339,7 +348,35 @@ static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
 }
 
 /* Parse a car GEOMETRY.BIN (36-byte verts w/ normals), tagging each mesh with
- * a class from its material name and its per-mesh diffuse texture key. */
+ * a class from its material name and its per-mesh diffuse texture key.
+ *
+ * INVESTIGATED (car submesh materials, Golf, all findings verified against
+ * real bytes): 0x134B02 DOES exist per car mesh object and DOES hold
+ * multiple 60-byte records (same 0x11-filler-prefix convention as every
+ * other leaf in this format; skip filler, then size/60 is exact) with
+ * varying mat_id/flag fields — e.g. GOLF_KIT00_FRONT_BUMPER_A has 5 records,
+ * mat_id 0-3, flag 0-4. Splitting the index buffer at these record
+ * boundaries and checking each record's vertex bbox confirms they ARE real,
+ * spatially-distinct sub-groups (a small asymmetric bracket vs. the big
+ * symmetric shell, etc.) — this part of the directive was right.
+ *
+ * BUT: the chain that would make this useful for TEXTURE routing —
+ * mat_id -> 0x134003 hash list -> a DIFFERENT 0x134011/0x134012 per submesh
+ * — does not exist for car objects. Checked every Golf mesh: zero objects
+ * have more than one 0x134011 material block or more than one 0x134012
+ * texture-slot list. There is exactly one texture key per whole object,
+ * full stop; mat_id/flag never select among alternatives because no
+ * alternatives are stored. flag's value set is a small, consistent {0..4}
+ * across unrelated meshes and mirrors (L/R copies of the same part keep the
+ * same flag, different mat_id) — looks like a small built-in render-state
+ * enum (cull mode / blend mode / vertex-color-source, guessing), not a
+ * material-lookup key. So "bind a different texture per submesh" is not
+ * implementable from this data — there is nothing per-submesh to bind.
+ * Splitting meshes at these boundaries anyway (same texture on every
+ * resulting piece) would add draw calls for a pixel-identical result, so
+ * it isn't done. If a future car is found with >1 material/texslot block
+ * per object, THAT would be the real signal this is worth revisiting.
+ * removed vinyl/badge fallback, not a real submesh material). */
 static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *scene,
                         const uint32_t *keys, int nkeys) {
     long o = beg;

@@ -190,7 +190,6 @@ int main(int argc, char **argv) {
        by a mesh into its own GL texture (body, wheel, brake, ... bound by UVs). */
     uint32_t ckeys[64]; int nck = ctdata ? n2_car_tex_keys(ctdata, ctlen, ckeys, 64) : 0;
     uint32_t mapkey[32]; GLuint maptex[32]; char mapalpha[32]; int nmap = 0;
-    GLuint vinyltex = 0;   /* composited vinyl+badge atlas (whole-body UVs) */
     N2Scene car; int ncar = 0; GpuMesh *cgm = NULL;
     float wheelT[4][16];                         /* 4 wheel placements (car-local) */
     GpuMesh wheelmesh; int have_wheel = 0;       /* procedural tyre, built after GL init */
@@ -294,10 +293,11 @@ int main(int argc, char **argv) {
                     maptex[j] = upload_tex(&out);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                    /* most body panels carry NO texkey (flat paint) but share
-                       the same UV layout the vinyl was authored for — they
-                       bind this composite in the draw loop */
-                    vinyltex = maptex[j];
+                    /* updates the badge atlas's OWN GL texture in place, so
+                       any mesh that references this key directly (its own
+                       0x134012 slot list, e.g. GOLF's BASE_A) picks up the
+                       vinyl-under-badge composite automatically in the draw
+                       loop — no separate fallback texture needed. */
                     break;
                 }
                 printf("vinyl layer: key %08x (%dx%d) composited under the badge atlas\n",
@@ -782,31 +782,49 @@ int main(int argc, char **argv) {
                 int is_light = (c==N2_CAR_LIGHT || c==N2_CAR_BRAKELIGHT);
                 if ((c==N2_CAR_BODY && !g_dbg.show_body) ||
                     (is_light       && !g_dbg.show_lights)|| (c==N2_CAR_TIRE && !g_dbg.show_tires) ||
-                    (c==N2_CAR_MISC && !g_dbg.show_misc)) continue;
+                    ((c==N2_CAR_MISC||c==N2_CAR_MECH) && !g_dbg.show_misc)) continue;
                 if (c == N2_CAR_GLASS) continue;   /* translucent: blended pass below */
                 glUniform1f(uSpec, (c==N2_CAR_BODY||c==N2_CAR_MISC)?g_dbg.body_spec
-                                 : is_light?0.45f : 0.0f);
+                                 : is_light?0.45f : c==N2_CAR_MECH?0.05f : 0.0f);
                 /* no diffuse texture exists for any light part (verified
                    exhaustively against the data, see n2_car_category) — chrome
-                   housing + coloured lens read entirely through reflection */
+                   housing + coloured lens read entirely through reflection.
+                   Mechanical compartment parts (engine/exhaust) are unpainted
+                   metal/plastic when they have no texture of their own — no
+                   body-paint gloss or reflection either. */
                 glUniform1f(rp.uEnv, (c==N2_CAR_BODY||c==N2_CAR_MISC)?0.35f
-                                   : is_light?0.55f : 0.15f);
+                                   : is_light?0.55f : c==N2_CAR_MECH?0.0f : 0.15f);
                 glUniform1f(rp.uDecal, 0.0f);   /* body branch may re-enable */
                 GLuint tex = 0; int hasalpha = 0;
                 for (int j = 0; j < nmap; j++) if (mapkey[j]==cgm[i].texkey) {
                     tex = maptex[j]; hasalpha = mapalpha[j]; break; }
                 if (c == N2_CAR_BODY || c == N2_CAR_MISC) {
-                    /* glossy paint; the badge+vinyl atlas overlays it where the
-                       combined DXT3 alpha says so (paint shows through
-                       elsewhere). Panels without their own texture share the
-                       body UV layout, so they wear the vinyl composite too.
-                       Alpha-less part textures (engine bay etc.) draw plain. */
+                    /* glossy paint; a mesh that references the badge/vinyl
+                       atlas in its OWN 0x134012 slot list (a real per-mesh
+                       data reference, e.g. GOLF's BASE_A) still decal-blends
+                       it — that's verified correct (renders the actual VW
+                       roundel). Panels with NO texture reference of their
+                       own render as pure metallic paint, full stop: no
+                       vinyl/badge fallback. (Removed: substituting the
+                       shared composite onto any texture-less panel "because
+                       it probably shares the same UV sheet" — false for
+                       most of them; on the Miata almost every body/misc
+                       mesh has no texkey at all, so the fallback painted
+                       the composite's stretched hook-shape/checker pattern
+                       across large panels like the engine bay, reading as
+                       a solid mismatched block. TODO: the data actually
+                       supports per-submesh materials via the 0x134B02
+                       submesh table (mat_id -> its own 0x134011/0x134012) —
+                       n2_walk_car currently assigns ONE texkey per whole
+                       mesh object from the first material found. Modeling
+                       submesh-level materials would let genuinely-textured
+                       sub-regions (if any exist) resolve correctly instead
+                       of an all-or-nothing per-object key. Not implemented. */
                     glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
                     if (tex && !hasalpha) {
                         glUniform1f(uUseTex, 1.0f);
                         glBindTexture(GL_TEXTURE_2D, tex);
                     } else {
-                        if (!tex && vinyltex) { tex = vinyltex; hasalpha = 1; }
                         if (tex) {
                             glUniform1f(uUseTex, 1.0f); glUniform1f(rp.uDecal, 1.0f);
                             glBindTexture(GL_TEXTURE_2D, tex);
@@ -817,8 +835,9 @@ int main(int argc, char **argv) {
                 } else {
                     glUniform1f(uUseTex, 0.0f);
                     if      (c == N2_CAR_LIGHT)      glUniform3f(uColor, 0.92f, 0.90f, 0.85f);  /* clear/chrome lens */
-                    else if (c == N2_CAR_BRAKELIGHT) glUniform3f(uColor, 0.75f, 0.10f, 0.08f);  /* red lens */
+                    else if (c == N2_CAR_BRAKELIGHT) glUniform3f(uColor, 0.60f, 0.02f, 0.02f);  /* rich red lens */
                     else if (c == N2_CAR_TIRE)       glUniform3f(uColor, 0.05f, 0.05f, 0.06f);
+                    else if (c == N2_CAR_MECH)       glUniform3f(uColor, 0.05f, 0.05f, 0.05f);  /* unpainted metal/plastic */
                     else                              glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
                 }
                 if (c != N2_CAR_TIRE) { draw_gpumesh(&cgm[i]); g_dbg.drawn++; }   /* tyres = procedural, below */
