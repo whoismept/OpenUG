@@ -39,6 +39,9 @@ typedef struct {
                                          is suppressed; read it in ImGui instead */
     char car_name[32], track_name[64];
     int  sel_car, n_cars, sel_track, n_tracks, sel_circuit, n_circuits;
+
+    /* --- diagnostics --- */
+    int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */
 } DbgState;
 
 extern DbgState g_dbg;

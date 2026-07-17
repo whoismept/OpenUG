@@ -623,6 +623,7 @@ int main(int argc, char **argv) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUniform3f(rp.uFogColor, g_dbg.fog_r, g_dbg.fog_g, g_dbg.fog_b);
         glUniform1f(rp.uFogDensity, g_dbg.fog_density);
+        glUniform1f(rp.uUVCheck, (float)g_dbg.show_uv_checker);
 
         float P[16], V[16], MVP[16];
         /* menu orbits ~9m from the car, so use a close near-plane there; the

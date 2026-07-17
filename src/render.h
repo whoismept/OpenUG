@@ -54,7 +54,10 @@ typedef struct {
           uDecal,   /* 1 = texture is an alpha-masked decal over uColor paint */
           uFogColor, uFogDensity,   /* exp^2 distance fog (matches the sky) */
           uCamPos,  /* camera in the current object's model space */
-          uEnv;     /* environment-reflection amount (cars only) */
+          uEnv,     /* environment-reflection amount (cars only) */
+          uUVCheck; /* 1 = show the diagnostic UV-coordinate visualization
+                       instead of lighting/texture (toggle lives in the
+                       ImGui Session panel, make debug only) */
 } RProg;
 
 /* world-space sun direction (night scene key light) */

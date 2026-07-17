@@ -32,10 +32,21 @@ static const char *FS =
     "uniform float uUseTex; uniform vec3 uColor; uniform float uUnlit; uniform float uAlpha; uniform float uSoft; uniform float uSpec; uniform float uDecal;\n"
     "uniform float uAmbient; uniform float uDiffuse; uniform vec3 uLight;\n"
     "uniform vec3 uFogColor; uniform float uFogDensity;\n"
-    "uniform vec3 uCamPos; uniform float uEnv;\n"
+    "uniform vec3 uCamPos; uniform float uEnv; uniform float uUVCheck;\n"
     /* exp^2 distance fog: fades far batches into the sky colour (which is
        cleared to uFogColor, so the horizon and the haze always agree) */
     "void main(){\n"
+    /* diagnostic UV visualization: bypasses lighting/texture/fog entirely.
+       R=u, G=v (raw, unclamped -- a mesh whose UVs run outside [0,1] shows
+       as a flat saturated patch instead of a gradient, exposing tiling
+       regions at a glance) with a darkened 10x10 grid overlaid so uneven
+       cell spacing reveals stretching and grid-line direction reveals
+       flips/mirrors. Checked first so it overrides every other path. */
+    "  if(uUVCheck>0.5){\n"
+    "    vec2 g=abs(fract(vUV*10.0-0.5)-0.5);\n"
+    "    float grid=smoothstep(0.0,0.04,min(g.x,g.y));\n"
+    "    gl_FragColor=vec4(vec3(vUV.x,vUV.y,0.2)*mix(0.35,1.0,grid),1.0); return;\n"
+    "  }\n"
     "  float fog = clamp(exp(-pow(vDepth*uFogDensity, 2.0)), 0.0, 1.0);\n"
     "  if(uUnlit>0.5){ float a=uAlpha;\n"
     "    if(uSoft>0.5){ float d=length(vUV-vec2(0.5)); a*=clamp(1.0-d*2.0,0.0,1.0); a*=a; }\n"
@@ -163,6 +174,7 @@ RProg render_program(void) {
     r.uFogDensity = glGetUniformLocation(r.prog, "uFogDensity");
     r.uCamPos = glGetUniformLocation(r.prog, "uCamPos");
     r.uEnv    = glGetUniformLocation(r.prog, "uEnv");
+    r.uUVCheck = glGetUniformLocation(r.prog, "uUVCheck");
     r.uAmbient = glGetUniformLocation(r.prog, "uAmbient");
     r.uDiffuse = glGetUniformLocation(r.prog, "uDiffuse");
     r.uLight   = glGetUniformLocation(r.prog, "uLight");
@@ -170,6 +182,7 @@ RProg render_program(void) {
     glUniform1f(r.uDecal, 0.0f);
     glUniform3f(r.uFogColor, 0.06f, 0.07f, 0.11f); glUniform1f(r.uFogDensity, 0.0f);
     glUniform3f(r.uCamPos, 0, 0, 0); glUniform1f(r.uEnv, 0.0f);
+    glUniform1f(r.uUVCheck, 0.0f);
     glUniform3f(r.uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);
     return r;
 }
@@ -371,7 +384,14 @@ GLuint make_wheel_tex(void) {
         o[0] = v; o[1] = v; o[2] = (unsigned char)(v + v/16);        /* cool metal */
     }
     N2Tex t = { S, S, px, NULL };
-    return upload_tex(&t);
+    GLuint id = upload_tex(&t);
+    /* radial, single-sample cap texture (no tiling intended) — clamp so a
+       filter footprint near u/v=0 or 1 can't wrap and bleed in colour from
+       the opposite edge, same reasoning as the car atlas/vinyl clamps. */
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return id;
 }
 
 /* unit-quad buffers for the 2D HUD / billboards (drawn in NDC via uMVP) */

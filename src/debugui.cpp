@@ -56,6 +56,9 @@ extern "C" void dbgui_frame(void) {
         ImGui::Text("track:   %-20s (%d/%d)", g_dbg.track_name, g_dbg.sel_track+1, g_dbg.n_tracks);
         ImGui::Text("circuit: %d/%d", g_dbg.sel_circuit+1, g_dbg.n_circuits);
         ImGui::TextDisabled("Left/Right car, Up/Down track, [ / ] circuit, Enter race");
+        ImGui::Checkbox("Show UV Checker", (bool *)&g_dbg.show_uv_checker);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(R=u, G=v, grid=10x10 cells; flat colour = UV outside [0,1])");
     }
     ImGui::Separator();
 
