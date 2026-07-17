@@ -17,27 +17,57 @@
 static const char *VS =
     GLSL_HEADER
     "attribute vec3 aPos; attribute vec2 aUV; attribute vec3 aNor;\n"
-    "uniform mat4 uMVP; varying vec2 vUV; varying vec3 vN;\n"
-    "void main(){ vUV=aUV; vN=aNor; gl_Position=uMVP*vec4(aPos,1.0); }\n";
+    "uniform mat4 uMVP; varying vec2 vUV; varying vec3 vN; varying float vDepth;\n"
+    "varying vec3 vPos;\n"
+    /* clip.w == view-space depth under a perspective projection, for world
+       (P*V) and car (P*V*M) alike — no view matrix or extra uniforms needed.
+       NDC-drawn HUD quads have w==1, so fog leaves them alone. */
+    "void main(){ vUV=aUV; vN=aNor; vPos=aPos; gl_Position=uMVP*vec4(aPos,1.0);\n"
+    "  vDepth=gl_Position.w; }\n";
 
 static const char *FS =
     GLSL_HEADER
-    "varying vec2 vUV; varying vec3 vN; uniform sampler2D uTex;\n"
-    "uniform float uUseTex; uniform vec3 uColor; uniform float uUnlit; uniform float uAlpha; uniform float uSoft; uniform float uSpec;\n"
+    "varying vec2 vUV; varying vec3 vN; varying float vDepth; varying vec3 vPos;\n"
+    "uniform sampler2D uTex;\n"
+    "uniform float uUseTex; uniform vec3 uColor; uniform float uUnlit; uniform float uAlpha; uniform float uSoft; uniform float uSpec; uniform float uDecal;\n"
     "uniform float uAmbient; uniform float uDiffuse; uniform vec3 uLight;\n"
+    "uniform vec3 uFogColor; uniform float uFogDensity;\n"
+    "uniform vec3 uCamPos; uniform float uEnv;\n"
+    /* exp^2 distance fog: fades far batches into the sky colour (which is
+       cleared to uFogColor, so the horizon and the haze always agree) */
     "void main(){\n"
+    "  float fog = clamp(exp(-pow(vDepth*uFogDensity, 2.0)), 0.0, 1.0);\n"
     "  if(uUnlit>0.5){ float a=uAlpha;\n"
     "    if(uSoft>0.5){ float d=length(vUV-vec2(0.5)); a*=clamp(1.0-d*2.0,0.0,1.0); a*=a; }\n"
-    "    gl_FragColor=vec4(uColor,a); return; }\n"
+    "    gl_FragColor=vec4(mix(uFogColor,uColor,fog),a); return; }\n"
     /* uLight is the sun direction in the OBJECT's model space: normals stay
        model-space (no per-vertex transform), so a rotated object (the car)
        must counter-rotate the light or its lit side turns with it. */
     "  vec3 L=normalize(uLight); vec3 N=normalize(vN);\n"
     "  float d=uAmbient+uDiffuse*max(dot(N,L),0.0);\n"   /* directional; reveals body form */
-    "  vec3 base = uUseTex>0.5 ? texture2D(uTex,vUV).rgb : uColor;\n"
+    /* uDecal: paint under an alpha-masked decal atlas (badges/vinyls) —
+       texture RGB shows only where its alpha says so, paint elsewhere */
+    "  vec4 t = texture2D(uTex,vUV);\n"
+    "  vec3 base = uUseTex>0.5 ? (uDecal>0.5 ? mix(uColor,t.rgb,t.a) : t.rgb) : uColor;\n"
     "  float sp = pow(max(dot(N,L),0.0), 20.0)*uSpec;\n"       /* glossy sheen (car paint) */
     "  float rim = pow(1.0-abs(N.z), 3.0)*uSpec*0.4;\n"        /* fresnel-ish edge sheen */
-    "  gl_FragColor=vec4(base*d*1.35 + sp + rim, 1.0);\n"      /* lift dark night textures + gloss */
+    "  vec3 lit = base*d*1.35 + sp + rim;\n"
+    /* environment reflection (cars only, uEnv>0): a procedural night-city
+       sphere — dark ground, warm city-glow horizon band, dim blue sky —
+       sampled with the model-space reflection vector, fresnel-weighted.
+       uCamPos is the camera in the SAME space as vPos/vN. */
+    "  if(uEnv>0.001){\n"
+    "    vec3 V = normalize(uCamPos - vPos);\n"
+    "    vec3 R = reflect(-V, N);\n"
+    "    float up = clamp(R.z*0.5+0.5, 0.0, 1.0);\n"
+    "    vec3 env = mix(vec3(0.02,0.02,0.03), vec3(0.05,0.06,0.11), up)\n"
+    "             + vec3(0.45,0.38,0.26)*pow(1.0-abs(R.z), 8.0);\n"
+    "    float fres = 0.35 + 0.65*pow(1.0-clamp(dot(N,V),0.0,1.0), 3.0);\n"
+    "    lit += env * (uEnv * fres);\n"
+    "  }\n"
+    /* lit alpha = uAlpha (1 everywhere but the blended glass pass), so
+       translucent glass keeps its specular highlight */
+    "  gl_FragColor=vec4(mix(uFogColor, lit, fog), uAlpha);\n"
     "}\n";
 
 /* ---- tiny 4x4 matrix (column-major) ---- */
@@ -128,12 +158,37 @@ RProg render_program(void) {
     r.uAlpha   = glGetUniformLocation(r.prog, "uAlpha");
     r.uSoft    = glGetUniformLocation(r.prog, "uSoft");
     r.uSpec    = glGetUniformLocation(r.prog, "uSpec");
+    r.uDecal   = glGetUniformLocation(r.prog, "uDecal");
+    r.uFogColor   = glGetUniformLocation(r.prog, "uFogColor");
+    r.uFogDensity = glGetUniformLocation(r.prog, "uFogDensity");
+    r.uCamPos = glGetUniformLocation(r.prog, "uCamPos");
+    r.uEnv    = glGetUniformLocation(r.prog, "uEnv");
     r.uAmbient = glGetUniformLocation(r.prog, "uAmbient");
     r.uDiffuse = glGetUniformLocation(r.prog, "uDiffuse");
     r.uLight   = glGetUniformLocation(r.prog, "uLight");
     glUniform1f(r.uAlpha, 1.0f); glUniform1f(r.uSoft, 0.0f); glUniform1f(r.uSpec, 0.0f);
+    glUniform1f(r.uDecal, 0.0f);
+    glUniform3f(r.uFogColor, 0.06f, 0.07f, 0.11f); glUniform1f(r.uFogDensity, 0.0f);
+    glUniform3f(r.uCamPos, 0, 0, 0); glUniform1f(r.uEnv, 0.0f);
     glUniform3f(r.uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);
     return r;
+}
+
+/* smoothed per-vertex normals for one mesh (area-weighted face accumulation);
+ * nor must hold nverts*3 floats, zeroed by the caller. */
+static void mesh_normals(const N2Mesh *m, float *nor) {
+    for (int t = 0; t + 2 < m->nidx; t += 3) {
+        int a=m->idx[t], b=m->idx[t+1], c=m->idx[t+2];
+        float *pa=m->verts+a*5,*pb=m->verts+b*5,*pc=m->verts+c*5;
+        float ux=pb[0]-pa[0],uy=pb[1]-pa[1],uz=pb[2]-pa[2];
+        float vx=pc[0]-pa[0],vy=pc[1]-pa[1],vz=pc[2]-pa[2];
+        float nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+        int ii[3]={a,b,c};
+        for(int e=0;e<3;e++){ nor[ii[e]*3]+=nx; nor[ii[e]*3+1]+=ny; nor[ii[e]*3+2]+=nz; }
+    }
+    for (int v=0;v<m->nverts;v++){ float*np=nor+v*3;
+        float l=sqrtf(np[0]*np[0]+np[1]*np[1]+np[2]*np[2]); if(l<1e-6f)l=1;
+        np[0]/=l; np[1]/=l; np[2]/=l; }
 }
 
 /* upload a scene's meshes to GPU buffers, computing per-vertex normals. */
@@ -142,18 +197,7 @@ GpuMesh *upload_scene(N2Scene *s) {
     for (int i = 0; i < s->count; i++) {
         N2Mesh *m = &s->meshes[i];
         float *nor = (float *)calloc(m->nverts * 3, sizeof(float));
-        for (int t = 0; t + 2 < m->nidx; t += 3) {
-            int a=m->idx[t], b=m->idx[t+1], c=m->idx[t+2];
-            float *pa=m->verts+a*5,*pb=m->verts+b*5,*pc=m->verts+c*5;
-            float ux=pb[0]-pa[0],uy=pb[1]-pa[1],uz=pb[2]-pa[2];
-            float vx=pc[0]-pa[0],vy=pc[1]-pa[1],vz=pc[2]-pa[2];
-            float nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
-            int ii[3]={a,b,c};
-            for(int e=0;e<3;e++){ nor[ii[e]*3]+=nx; nor[ii[e]*3+1]+=ny; nor[ii[e]*3+2]+=nz; }
-        }
-        for (int v=0;v<m->nverts;v++){ float*np=nor+v*3;
-            float l=sqrtf(np[0]*np[0]+np[1]*np[1]+np[2]*np[2]); if(l<1e-6f)l=1;
-            np[0]/=l; np[1]/=l; np[2]/=l; }
+        mesh_normals(m, nor);
         glGenBuffers(1,&gm[i].vbo); glBindBuffer(GL_ARRAY_BUFFER,gm[i].vbo);
         glBufferData(GL_ARRAY_BUFFER, m->nverts*5*sizeof(float), m->verts, GL_STATIC_DRAW);
         glGenBuffers(1,&gm[i].nbo); glBindBuffer(GL_ARRAY_BUFFER,gm[i].nbo);
@@ -164,6 +208,114 @@ GpuMesh *upload_scene(N2Scene *s) {
         free(nor);
     }
     return gm;
+}
+
+/* ---- static-world batching ---- */
+
+typedef struct { uint64_t key; int idx; } BSortEnt;   /* (cell,tex) -> mesh */
+static int bsort_cmp(const void *a, const void *b) {
+    uint64_t ka = ((const BSortEnt *)a)->key, kb = ((const BSortEnt *)b)->key;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+}
+static int btex_cmp(const void *a, const void *b) {   /* final texture order */
+    GLuint ta = ((const N2Batch *)a)->tex, tb = ((const N2Batch *)b)->tex;
+    return ta < tb ? -1 : ta > tb ? 1 : 0;
+}
+
+#define BATCH_CELL     256.0f   /* grid cell edge, metres */
+#define BATCH_MAXVERTS 65535    /* u16 indices (GLES2: no u32 without ext) */
+
+/* merge meshes [i0,i1) of the sort array into one uploaded batch */
+static void batch_emit(const N2Scene *s, const BSortEnt *ent, int i0, int i1,
+                       GLuint tex, N2Batch *b) {
+    int nv = 0, ni = 0;
+    for (int k = i0; k < i1; k++) {
+        nv += s->meshes[ent[k].idx].nverts; ni += s->meshes[ent[k].idx].nidx;
+    }
+    BatchedVertex *bv = (BatchedVertex *)malloc((size_t)nv * sizeof *bv);
+    uint16_t *bi = (uint16_t *)malloc((size_t)ni * sizeof *bi);
+    float mn[3] = {1e30f,1e30f,1e30f}, mx[3] = {-1e30f,-1e30f,-1e30f};
+    int vo = 0, io = 0;
+    for (int k = i0; k < i1; k++) {
+        const N2Mesh *m = &s->meshes[ent[k].idx];
+        float *nor = (float *)calloc((size_t)m->nverts * 3, sizeof(float));
+        mesh_normals(m, nor);          /* per source mesh: no cross-mesh smoothing */
+        for (int v = 0; v < m->nverts; v++) {
+            BatchedVertex *o = &bv[vo + v]; const float *p = m->verts + v*5;
+            o->pos[0]=p[0]; o->pos[1]=p[1]; o->pos[2]=p[2];
+            o->uv[0]=p[3];  o->uv[1]=p[4];
+            o->normal[0]=nor[v*3]; o->normal[1]=nor[v*3+1]; o->normal[2]=nor[v*3+2];
+            for (int c = 0; c < 3; c++) {
+                if (p[c] < mn[c]) mn[c] = p[c];
+                if (p[c] > mx[c]) mx[c] = p[c];
+            }
+        }
+        for (int t = 0; t < m->nidx; t++) bi[io + t] = (uint16_t)(m->idx[t] + vo);
+        vo += m->nverts; io += m->nidx;
+        free(nor);
+    }
+    memset(b, 0, sizeof *b);
+    glGenBuffers(1, &b->vbo); glBindBuffer(GL_ARRAY_BUFFER, b->vbo);
+    glBufferData(GL_ARRAY_BUFFER, (long)nv * (long)sizeof *bv, bv, GL_STATIC_DRAW);
+    glGenBuffers(1, &b->ibo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b->ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (long)ni * 2, bi, GL_STATIC_DRAW);
+    b->index_count = ni; b->tex = tex; b->nmesh = i1 - i0;
+    b->texkey = s->meshes[ent[i0].idx].texkey;
+    for (int c = 0; c < 3; c++) { b->bbox_min[c] = mn[c]; b->bbox_max[c] = mx[c]; }
+    free(bv); free(bi);
+}
+
+int upload_world_batches(const N2Scene *s, const float (*mbb)[4],
+                         const GLuint *mtex, GLuint texTerr, N2Batch **out) {
+    int n = s->count;
+    /* world extent -> grid coords */
+    float x0 = 1e30f, y0 = 1e30f;
+    for (int i = 0; i < n; i++) {
+        if (mbb[i][0] < x0) x0 = mbb[i][0];
+        if (mbb[i][1] < y0) y0 = mbb[i][1];
+    }
+    /* sort meshes by (cell, resolved texture) */
+    BSortEnt *ent = (BSortEnt *)malloc((size_t)n * sizeof *ent);
+    for (int i = 0; i < n; i++) {
+        const N2Mesh *m = &s->meshes[i];
+        GLuint tex = mtex[i];
+        if (!tex && m->cat == N2_TERRAIN) tex = texTerr;   /* fallback baked in */
+        float cx = (mbb[i][0]+mbb[i][2])*0.5f, cy = (mbb[i][1]+mbb[i][3])*0.5f;
+        uint64_t cell = (uint64_t)(uint32_t)((int)((cy-y0)/BATCH_CELL)*4096
+                                           + (int)((cx-x0)/BATCH_CELL));
+        ent[i].key = cell << 32 | tex; ent[i].idx = i;
+    }
+    qsort(ent, (size_t)n, sizeof *ent, bsort_cmp);
+    /* walk key runs, splitting a run at the u16 vertex ceiling */
+    int cap = 256, nb = 0;
+    N2Batch *bat = (N2Batch *)malloc((size_t)cap * sizeof *bat);
+    int i0 = 0, verts = 0;
+    for (int i = 0; i <= n; i++) {
+        int flush = (i == n) || (i > i0 && ent[i].key != ent[i0].key) ||
+                    (i > i0 && verts + s->meshes[ent[i].idx].nverts > BATCH_MAXVERTS);
+        if (flush && i > i0) {
+            if (nb == cap) { cap *= 2; bat = (N2Batch *)realloc(bat, (size_t)cap * sizeof *bat); }
+            batch_emit(s, ent, i0, i, (GLuint)(ent[i0].key & 0xffffffffu), &bat[nb++]);
+            i0 = i; verts = 0;
+        }
+        if (i < n) verts += s->meshes[ent[i].idx].nverts;
+    }
+    free(ent);
+    qsort(bat, (size_t)nb, sizeof *bat, btex_cmp);   /* minimise texture binds */
+    *out = bat;
+    return nb;
+}
+
+void draw_batch(const N2Batch *b) {
+    glBindBuffer(GL_ARRAY_BUFFER, b->vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BatchedVertex), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(BatchedVertex), (void*)12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(BatchedVertex), (void*)20);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b->ibo);
+    glDrawElements(GL_TRIANGLES, b->index_count, GL_UNSIGNED_SHORT, 0);
 }
 
 /* Build a clean procedural wheel (short cylinder, axle along Y, disc in X-Z) —
@@ -199,6 +351,29 @@ GpuMesh make_wheel(float R, float halfW) {
     return out;
 }
 
+/* Procedural alloy-rim texture for the wheel caps: the cap UVs are radial
+ * (centre 0.5,0.5, ring at uv-radius 0.5), so paint by relative radius —
+ * bright hub disc, spoked metal mid, dark rubber edge. The tread quads
+ * sample the outer ring = rubber. */
+GLuint make_wheel_tex(void) {
+    enum { S = 64 };
+    static unsigned char px[S*S*3];
+    for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) {
+        float dx = (x+0.5f)/S - 0.5f, dy = (y+0.5f)/S - 0.5f;
+        float r = sqrtf(dx*dx + dy*dy) * 2.0f;      /* 0 centre .. 1 ring */
+        unsigned char v;
+        if (r > 0.78f)      v = 14;                                  /* rubber */
+        else if (r > 0.30f) {                                        /* spokes */
+            float spoke = 0.5f + 0.5f*cosf(5.0f*atan2f(dy, dx));
+            v = (unsigned char)(38 + 70.0f*spoke*spoke);
+        } else               v = r < 0.10f ? 150 : 105;              /* hub */
+        unsigned char *o = px + (y*S + x)*3;
+        o[0] = v; o[1] = v; o[2] = (unsigned char)(v + v/16);        /* cool metal */
+    }
+    N2Tex t = { S, S, px, NULL };
+    return upload_tex(&t);
+}
+
 /* unit-quad buffers for the 2D HUD / billboards (drawn in NDC via uMVP) */
 GpuMesh make_quad(void) {
     GpuMesh quad; memset(&quad, 0, sizeof quad);
@@ -230,7 +405,16 @@ void draw_gpumesh(GpuMesh *g) {
 
 GLuint upload_tex(const N2Tex *t) {
     GLuint id; glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_RGB,t->w,t->h,0,GL_RGB,GL_UNSIGNED_BYTE,t->rgb);
+    if (t->alpha) {   /* interleave the decal-mask plane -> RGBA */
+        unsigned char *px = (unsigned char *)malloc((size_t)t->w * t->h * 4);
+        for (long p = 0; p < (long)t->w * t->h; p++) {
+            px[p*4]=t->rgb[p*3]; px[p*4+1]=t->rgb[p*3+1];
+            px[p*4+2]=t->rgb[p*3+2]; px[p*4+3]=t->alpha[p];
+        }
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,t->w,t->h,0,GL_RGBA,GL_UNSIGNED_BYTE,px);
+        free(px);
+    } else
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGB,t->w,t->h,0,GL_RGB,GL_UNSIGNED_BYTE,t->rgb);
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);

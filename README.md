@@ -103,8 +103,10 @@ renders one frame to a PNG and exits.
 src/
   main.c      orchestrator: setup, game loop, input, race flow, HUD
   nfsu2.h     single-header asset parser (chunk formats — the ground truth)
+  world.*     World: multi-region city stitching, texture binding, per-mesh
+              bounds for culling, grid-accelerated ground queries
   render.*    Renderer: GL objects, shaders, matrices, bitmap font, screenshot
-  physics.*   car kinematics, wall + car-to-car collision
+  physics.*   car kinematics (real units, NFSU2-tuned), wall + car collision
   ai.*        racing-line opponents, circuit loading
   audio.*     procedural engine/road/skid synth (no audio assets)
   resource.*  file mapping + track/car/circuit discovery
@@ -116,9 +118,10 @@ docs/    format documentation + engine architecture brief (INIT.md)
 ## Contributing
 
 Reverse-engineering notes live in `docs/FORMATS.md`; the `tools/` scripts are
-handy for poking at the data. Good next steps: decoding the global road-texture
-pack (roads currently draw as flat asphalt), stitching multiple track regions,
-and a proper front-end menu.
+handy for poking at the data. The whole city now loads by default (`--track ALL`
+stitches every STREAM region); good next steps: batching world meshes into
+per-texture VBOs (draw count is the frame-time ceiling), distance fog to hide
+the view-range pop-in, and a proper front-end menu.
 
 ## Credits
 
@@ -131,6 +134,7 @@ Format reverse-engineering builds on prior community work, used as references
   Big thanks for the great work.
 - **[Nikki](https://github.com/MaxHwoy/Nikki)** — TPK / texture header reference.
 - **[OpenNFSTools](https://github.com/MWisBest/OpenNFSTools)** — JDLZ algorithm reference.
+- **[vgmstream](https://github.com/vgmstream/vgmstream)** — Gnsu20 / EA-XAS v0 format reference.
 
 See [`docs/FORMATS.md`](docs/FORMATS.md) for details.
 

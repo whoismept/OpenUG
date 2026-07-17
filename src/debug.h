@@ -18,6 +18,8 @@ typedef struct {
 
     /* --- lighting (fed to the shader as uniforms) --- */
     float ambient, diffuse, body_spec;
+    float fog_density;          /* exp^2 fog: f = exp(-(depth*density)^2) */
+    float fog_r, fog_g, fog_b;  /* fog + sky-clear colour (kept identical) */
 
     /* --- car appearance --- */
     int   paint_override;        /* 1 = use paint[] below instead of the per-car hash */
@@ -27,6 +29,16 @@ typedef struct {
     /* --- readouts (engine writes, panel displays) --- */
     float cam[3], car[3], heading, kmh;
     int   car_meshes, track_meshes, fps;
+    int   drawn;
+
+    /* --- session info + menu HUD (moved off the 3D viewport in debug builds:
+       consulted only under DEBUG_UI, so plain builds are unaffected either
+       way) --- */
+    int  hud_hide_menu;              /* 1 = the retro pixel-font menu overlay
+                                         (car/track name, pips, prompt bar)
+                                         is suppressed; read it in ImGui instead */
+    char car_name[32], track_name[64];
+    int  sel_car, n_cars, sel_track, n_tracks, sel_circuit, n_circuits;
 } DbgState;
 
 extern DbgState g_dbg;

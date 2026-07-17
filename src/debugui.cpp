@@ -38,11 +38,25 @@ extern "C" void dbgui_frame(void) {
     ImGui::Begin("OpenUG Debug");
     g_dbg.fps = (int)ImGui::GetIO().Framerate;
 
-    ImGui::Text("%.1f FPS   car:%d track:%d", ImGui::GetIO().Framerate,
-                g_dbg.car_meshes, g_dbg.track_meshes);
+    ImGui::Text("%.1f FPS   total=%d   cars=%d  track=%d", 
+                ImGui::GetIO().Framerate,
+                g_dbg.drawn, g_dbg.car_meshes, g_dbg.track_meshes);
     ImGui::Text("cam  %.1f %.1f %.1f", g_dbg.cam[0], g_dbg.cam[1], g_dbg.cam[2]);
     ImGui::Text("car  %.1f %.1f %.1f  hdg %.2f  %.0f km/h",
                 g_dbg.car[0], g_dbg.car[1], g_dbg.car[2], g_dbg.heading, g_dbg.kmh);
+    ImGui::Separator();
+
+    if (ImGui::CollapsingHeader("Session", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool show_menu_hud = !g_dbg.hud_hide_menu;
+        ImGui::Checkbox("show 3D menu HUD", &show_menu_hud);
+        g_dbg.hud_hide_menu = !show_menu_hud;
+        ImGui::SameLine();
+        ImGui::TextDisabled("(off = viewport is scene-only; this panel still shows selection)");
+        ImGui::Text("car:     %-20s (%d/%d)", g_dbg.car_name, g_dbg.sel_car+1, g_dbg.n_cars);
+        ImGui::Text("track:   %-20s (%d/%d)", g_dbg.track_name, g_dbg.sel_track+1, g_dbg.n_tracks);
+        ImGui::Text("circuit: %d/%d", g_dbg.sel_circuit+1, g_dbg.n_circuits);
+        ImGui::TextDisabled("Left/Right car, Up/Down track, [ / ] circuit, Enter race");
+    }
     ImGui::Separator();
 
     ImGui::Checkbox("Freecam (F)", (bool *)&g_dbg.freecam);
@@ -61,6 +75,8 @@ extern "C" void dbgui_frame(void) {
         ImGui::SliderFloat("ambient",   &g_dbg.ambient,   0.0f, 1.0f);
         ImGui::SliderFloat("diffuse",   &g_dbg.diffuse,   0.0f, 1.5f);
         ImGui::SliderFloat("body spec", &g_dbg.body_spec, 0.0f, 1.0f);
+        ImGui::SliderFloat("fog density", &g_dbg.fog_density, 0.0f, 0.01f, "%.4f");
+        ImGui::ColorEdit3("fog / sky", &g_dbg.fog_r);
     }
     if (ImGui::CollapsingHeader("Car parts", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("body",   (bool *)&g_dbg.show_body);   ImGui::SameLine();

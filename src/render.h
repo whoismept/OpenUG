@@ -26,11 +26,35 @@
 /* per-mesh GPU buffers + computed normals */
 typedef struct { GLuint vbo, nbo, ibo; int nidx, cat; uint32_t texkey; } GpuMesh;
 
+/* ---- static-world batching: meshes merged per (256m grid cell, texture) ----
+ * One interleaved VBO per batch kills the per-mesh bind/attrib overhead;
+ * batches stay small enough for the XY distance cull to keep working. */
+typedef struct {
+    float pos[3];
+    float uv[2];
+    float normal[3];
+} BatchedVertex;              /* 32 B, interleaved */
+
+typedef struct {
+    GLuint vbo;               /* unified interleaved VBO */
+    GLuint ibo;               /* consolidated u16 IBO (<= 65535 verts/batch) */
+    int index_count;
+    uint32_t texkey;          /* first member mesh's TPK key (debugging) */
+    GLuint tex;               /* resolved GL texture (0 = untextured fallback) */
+    int nmesh;                /* source meshes merged in (drawn-mesh metric) */
+    float bbox_min[3];        /* culling bounds */
+    float bbox_max[3];
+} N2Batch;
+
 /* the one shader program + its uniform handles */
 typedef struct {
     GLuint prog;
     GLint uMVP, uUseTex, uColor, uUnlit, uAlpha, uSoft, uSpec, uAmbient, uDiffuse,
-          uLight;   /* sun direction in the CURRENT object's model space */
+          uLight,   /* sun direction in the CURRENT object's model space */
+          uDecal,   /* 1 = texture is an alpha-masked decal over uColor paint */
+          uFogColor, uFogDensity,   /* exp^2 distance fog (matches the sky) */
+          uCamPos,  /* camera in the current object's model space */
+          uEnv;     /* environment-reflection amount (cars only) */
 } RProg;
 
 /* world-space sun direction (night scene key light) */
@@ -49,8 +73,17 @@ void mat_lookat(const float *eye, const float *fwd, float *m);   /* up = world +
 RProg    render_program(void);          /* compile+link the shader, fetch uniforms */
 GpuMesh *upload_scene(N2Scene *s);      /* VBO/NBO/IBO per mesh, normals computed */
 GpuMesh  make_wheel(float R, float halfW);  /* procedural tyre (see render.c) */
+GLuint   make_wheel_tex(void);          /* radial alloy-rim texture for it */
 GpuMesh  make_quad(void);               /* unit quad for HUD / billboards */
 void     draw_gpumesh(GpuMesh *g);
+
+/* Merge the static world into per-(cell,texture) batches and upload them.
+ * mtex = per-mesh resolved GL texture, texTerr = grass fallback for terrain
+ * meshes without one. Sorted by texture so binds are rare. The CPU-side scene
+ * is left untouched (physics reads it). Returns the batch count. */
+int  upload_world_batches(const N2Scene *s, const float (*mbb)[4],
+                          const GLuint *mtex, GLuint texTerr, N2Batch **out);
+void draw_batch(const N2Batch *b);
 GLuint   upload_tex(const N2Tex *t);
 
 /* ---- 3x5 bitmap font (uppercase, digits, _ - /) ---- */

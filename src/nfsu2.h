@@ -14,7 +14,7 @@
 enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2, N2_SKY = 3,
        /* car mesh classes, from material name */
        N2_CAR_BODY = 10, N2_CAR_GLASS = 11, N2_CAR_LIGHT = 12,
-       N2_CAR_TIRE = 13, N2_CAR_MISC = 14 };
+       N2_CAR_TIRE = 13, N2_CAR_MISC = 14, N2_CAR_BRAKELIGHT = 15 };
 typedef struct {
     float   *verts;   /* 5 floats per vertex: pos.xyz, uv */
     int      nverts;
@@ -29,8 +29,9 @@ typedef struct {
     int     count, cap;
 } N2Scene;
 
-/* Decoded RGB texture (3 bytes/pixel, top-left origin). */
-typedef struct { int w, h; unsigned char *rgb; } N2Tex;
+/* Decoded RGB texture (3 bytes/pixel, top-left origin). alpha is a separate
+ * w*h plane, only non-NULL for DXT3 car textures (decal/badge masks). */
+typedef struct { int w, h; unsigned char *rgb; unsigned char *alpha; } N2Tex;
 
 /* ---- file I/O ---- */
 static unsigned char *n2_read_file(const char *path, long *out_len) {
@@ -267,6 +268,13 @@ static int n2_car_category(const unsigned char *d, long beg, long end) {
                 if (j - i >= 5) {
                     const unsigned char *n = p + i; long L = j - i;
                     if (n2_contains(n,L,"WINDOW") || n2_contains(n,L,"GLASS")) return N2_CAR_GLASS;
+                    /* no diffuse texture exists anywhere in the extracted data
+                       for ANY light part (verified: not this car's own TPK, not
+                       the shared CARS/TEXTURES.BIN, not any file under GLOBAL —
+                       exhaustive search) — housings are chrome+lens by material
+                       colour, same treatment as glass. BRAKE first: "BRAKELIGHT"
+                       contains "LIGHT" too. */
+                    if (n2_contains(n,L,"BRAKE") && n2_contains(n,L,"LIGHT"))  return N2_CAR_BRAKELIGHT;
                     if (n2_contains(n,L,"LIGHT") || n2_contains(n,L,"LAMP"))   return N2_CAR_LIGHT;
                     if (n2_contains(n,L,"TIRE") || n2_contains(n,L,"WHEEL"))   return N2_CAR_TIRE;
                     if (n2_contains(n,L,"BASE") || n2_contains(n,L,"BODY") ||
@@ -295,7 +303,11 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
                 while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
                 if (j - i >= 5) {
                     const unsigned char *n = p + i; long L = j - i;
-                    if (n2_contains(n,L,"STYLE") || n2_contains(n,L,"KITW")) return 1;
+                    if (n2_contains(n,L,"STYLE") || n2_contains(n,L,"KITW") ||
+                        n2_contains(n,L,"WIDE")  ||   /* widebody variants (WIDE1..4) */
+                        n2_contains(n,L,"DECAL"))     /* decal mount shells (used only
+                                                         when a sticker is applied) */
+                        return 1;
                     for (long q = 0; q + 4 < L; q++)          /* KIT01..KIT99, not KIT00 */
                         if (n[q]=='K'&&n[q+1]=='I'&&n[q+2]=='T'&&
                             n[q+3]>='0'&&n[q+3]<='9'&&n[q+4]>='0'&&n[q+4]<='9'&&
@@ -446,13 +458,15 @@ static void n2_dxt1(const unsigned char *src, int w, int h, unsigned char *out) 
         }
 }
 
-static void n2_dxt3(const unsigned char *src, int w, int h, unsigned char *out) {
+/* alf: optional w*h output for the block's 4-bit explicit alpha (may be NULL) */
+static void n2_dxt3(const unsigned char *src, int w, int h, unsigned char *out,
+                    unsigned char *alf) {
     int bi = 0;
     for (int by = 0; by < h; by += 4)
         for (int bx = 0; bx < w; bx += 4) {
-            /* 8-byte 4-bit alpha (skipped), then 8-byte DXT1 colour */
+            /* 8-byte 4-bit alpha, then 8-byte DXT1 colour */
             uint16_t c0 = src[bi+8] | src[bi+9] << 8, c1 = src[bi+10] | src[bi+11] << 8;
-            uint32_t bits = n2_u32(src + bi + 12); bi += 16;
+            uint32_t bits = n2_u32(src + bi + 12);
             unsigned char pal[4][3];
             n2_rgb565(c0, pal[0]); n2_rgb565(c1, pal[1]);
             for (int j = 0; j < 3; j++) {
@@ -464,7 +478,12 @@ static void n2_dxt3(const unsigned char *src, int w, int h, unsigned char *out) 
                     int x = bx+px, y = by+py; if (x >= w || y >= h) continue;
                     int idx = (bits >> (2*(py*4+px))) & 3;
                     memcpy(out + (y*w+x)*3, pal[idx], 3);
+                    if (alf) {
+                        int a4 = (src[bi + (py*4+px)/2] >> (((py*4+px)&1)*4)) & 15;
+                        alf[y*w+x] = (unsigned char)(a4 * 17);
+                    }
                 }
+            bi += 16;
         }
 }
 
@@ -486,6 +505,101 @@ static int n2_jdlz(const unsigned char *s, int slen, unsigned char *out, int out
             flags2 >>= 1;
         } else out[op++] = s[ip++];
         flags1 >>= 1;
+    }
+    return op;
+}
+
+/* ---- EA "HUFF" (EAC canonical-Huffman, methods 30FBh..35FBh) ----
+ * Used by CARS/ * /VINYLS.BIN blobs ("HUFF" wrapper + EAC stream). Format per
+ * Martin Korth's documentation (problemkaputt.de/psx-spx.htm, "CDROM File
+ * Compression EA Methods (Huffman)"), reimplemented from the spec:
+ * big-endian bitstream; header = u16 method + optional 3B + u24 size + u8
+ * escape; canonical code widths until the Kraft sum fills the code space;
+ * symbols delta-assigned over not-yet-used values; ESC = {varlen 0: EOS-bit
+ * or raw literal; varlen n: repeat previous byte n times}. */
+
+typedef struct { const unsigned char *b; long len, pos; } N2Bits;
+static uint32_t n2_bits(N2Bits *s, int n) {
+    uint32_t v = 0;
+    while (n-- > 0) {
+        if (s->pos >= s->len * 8) return v << (n + 1);   /* starved: zeros */
+        v = v << 1 | ((s->b[s->pos >> 3] >> (7 - (s->pos & 7))) & 1);
+        s->pos++;
+    }
+    return v;
+}
+static uint32_t n2_huff_varlen(N2Bits *s) {
+    int num = 2;
+    while (n2_bits(s, 1) == 0 && num < 24) num++;
+    return n2_bits(s, num) + (1u << num) - 4;
+}
+
+/* Decompress one EAC Huffman stream into out. Returns bytes written (0=fail). */
+static long n2_huff(const unsigned char *src, long slen, unsigned char *out, long cap) {
+    N2Bits s = { src, slen, 0 };
+    uint32_t method = n2_bits(&s, 16);
+    if ((method & 0xF0FF) != 0x30FB) return 0;
+    if (method & 0x100) n2_bits(&s, 24);
+    long dsize = (long)n2_bits(&s, 24);
+    if (dsize <= 0 || dsize > cap) return 0;
+    int esc = (int)n2_bits(&s, 8);
+    int numcodes[17] = {0}, width = 0, total = 0;
+    uint32_t code = 0;
+    while (width < 16 && (code << (16 - width)) < 0x10000u) {
+        uint32_t n = n2_huff_varlen(&s);
+        width++;
+        if (n > 256) return 0;
+        numcodes[width] = (int)n; total += (int)n;
+        code = code * 2 + n;
+    }
+    if (total < 1 || total > 256) return 0;
+    unsigned char vals[256], defined[256];
+    memset(defined, 0, sizeof defined);
+    int dat = 0xFF;
+    for (int i = 0; i < total; i++) {
+        long n = (long)n2_huff_varlen(&s) + 1;
+        if (n > 256) return 0;
+        while (n > 0) {
+            dat = (dat + 1) & 0xFF;
+            if (!defined[dat]) n--;
+        }
+        defined[dat] = 1; vals[i] = (unsigned char)dat;
+    }
+    /* canonical decode tables */
+    uint32_t first_code[18]; int first_idx[18];
+    uint32_t c = 0; int idx = 0;
+    for (int w = 1; w <= width; w++) {
+        first_code[w] = c; first_idx[w] = idx;
+        c = (c + (uint32_t)numcodes[w]) << 1; idx += numcodes[w];
+    }
+    long op = 0;
+    while (op < dsize && s.pos < s.len * 8) {
+        uint32_t v = 0; int w = 0, sym = -1;
+        while (w < width) {
+            v = v << 1 | n2_bits(&s, 1); w++;
+            if (v - first_code[w] < (uint32_t)numcodes[w]) {
+                sym = vals[first_idx[w] + (int)(v - first_code[w])]; break;
+            }
+        }
+        if (sym < 0) return 0;                    /* corrupt tree/stream */
+        if (sym != esc) { out[op++] = (unsigned char)sym; continue; }
+        uint32_t n = n2_huff_varlen(&s);
+        if (n == 0) {
+            if (n2_bits(&s, 1) == 1) break;       /* end of stream */
+            out[op++] = (unsigned char)n2_bits(&s, 8);
+        } else {
+            unsigned char prev = op ? out[op-1] : 0;
+            while (n-- > 0 && op < dsize) out[op++] = prev;
+        }
+    }
+    if (op != dsize) return 0;
+    if ((method & 0xFEFF) == 0x32FB) {            /* optional delta filters */
+        unsigned char x = 0;
+        for (long i = 0; i < dsize; i++) { x = (unsigned char)(x + out[i]); out[i] = x; }
+    } else if ((method & 0xFEFF) == 0x34FB) {
+        unsigned char x = 0, y = 0;
+        for (long i = 0; i < dsize; i++) { x = (unsigned char)(x + out[i]);
+                                           y = (unsigned char)(y + x); out[i] = y; }
     }
     return op;
 }
@@ -515,12 +629,18 @@ static int n2_car_tex_keys(const unsigned char *d, long len, uint32_t *keys, int
     return n;
 }
 
-/* Byte size of a full mip chain for a square s×s texture (bpb = 8 DXT1 / 16 DXT3). */
-static int n2_mipbytes(int s, int bpb) {
-    int t = 0, w = s;
-    for (;;) { int bw = w < 4 ? 1 : w/4; t += bw*bw*bpb; if (w == 1) break; w /= 2; }
+/* Byte size of a full mip chain for a w×h texture (bpb = 8 DXT1 / 16 DXT3). */
+static int n2_mipbytes2(int w, int h, int bpb) {
+    int t = 0;
+    for (;;) {
+        int bw = w < 4 ? 1 : w/4, bh = h < 4 ? 1 : h/4;
+        t += bw*bh*bpb;
+        if (w == 1 && h == 1) break;
+        if (w > 1) w /= 2; if (h > 1) h /= 2;
+    }
     return t;
 }
+static int n2_mipbytes(int s, int bpb) { return n2_mipbytes2(s, s, bpb); }
 
 /* Decode ONE car texture by its TPK key: find the slot, JDLZ-decompress, then
  * recover square dims + DXT1/DXT3 by matching the mip-chain size to DecodedSize
@@ -536,18 +656,88 @@ static int n2_load_car_tex_by_key(const unsigned char *d, long len, uint32_t key
         }
     if (dec <= 0 || absoff < 0 || (long)absoff + enc > len) return 0;
     unsigned char *raw = (unsigned char *)malloc(dec);
-    n2_jdlz(d + absoff, enc, raw, dec);
-    int side = 0, dxt3 = 0, bestd = 1 << 30;
-    for (int s = 8; s <= 512; s <<= 1) {
-        int d1 = dec - n2_mipbytes(s, 8), d3 = dec - n2_mipbytes(s, 16);
+    if (enc >= 20 && memcmp(d + absoff, "HUFF", 4) == 0) {
+        /* "HUFF"-wrapped blob (16-byte wrapper + EAC Huffman stream) — used
+           by every VINYLS.BIN slot and by some TEXTURES.BIN slots. If the
+           payload carries a vinyl record it's decoded here; otherwise it's
+           raw DXT and falls through to the square solver below. */
+        if (n2_huff(d + absoff + 16, enc - 16, raw, dec) != dec)
+            { free(raw); return 0; }
+        /* HUFF payload = pixel data (base level only) + a 144-byte trailing
+           record: name[24], key u32 @+0x18 (validates the slot), w,h u16s
+           @+0x38, format u32 @+0x84 — ASCII "DXT1"/"DXT3", or a code
+           (0x29 etc.) for P8-style palette indices (vinyls). */
+        if (dec >= 144) {
+            const unsigned char *rec = raw + dec - 144;
+            int w = rec[0x38] | rec[0x39] << 8, h = rec[0x3a] | rec[0x3b] << 8;
+            uint32_t fmt = n2_u32(rec + 0x84);
+            if (w >= 8 && h >= 8 && w <= 2048 && h <= 2048 &&
+                n2_u32(rec + 0x18) == key && rec[0] >= 'A' && rec[0] <= 'Z') {
+                long n = (long)w * h;
+                if (fmt == 0x31545844 && n/2 + 144 <= dec) {        /* "DXT1" */
+                    t->w = w; t->h = h; t->alpha = NULL;
+                    t->rgb = (unsigned char *)malloc(n * 3);
+                    n2_dxt1(raw, w, h, t->rgb);
+                    free(raw); return 1;
+                }
+                if (fmt == 0x33545844 && n + 144 <= dec) {          /* "DXT3" */
+                    t->w = w; t->h = h;
+                    t->rgb = (unsigned char *)malloc(n * 3);
+                    t->alpha = (unsigned char *)malloc(n);
+                    n2_dxt3(raw, w, h, t->rgb, t->alpha);
+                    free(raw); return 1;
+                }
+                if (n + 144 <= dec) {
+                    /* palette indices (vinyls). The palette ships ALL-ZERO —
+                       the game recolors vinyls from the player's colours —
+                       so synthesize a dark cut-vinyl look: most-frequent
+                       index = transparent background. */
+                    long hist[256] = {0};
+                    for (long i = 0; i < n; i++) hist[raw[i]]++;
+                    int bg = 0;
+                    for (int i = 1; i < 256; i++) if (hist[i] > hist[bg]) bg = i;
+                    t->w = w; t->h = h;
+                    t->rgb = (unsigned char *)malloc(n * 3);
+                    t->alpha = (unsigned char *)malloc(n);
+                    for (long i = 0; i < n; i++) {
+                        int ix = raw[i];
+                        unsigned char v = (unsigned char)(20 + (ix & 15) * 8);
+                        t->rgb[i*3] = v; t->rgb[i*3+1] = v; t->rgb[i*3+2] = v;
+                        t->alpha[i] = ix == bg ? 0 : 255;
+                    }
+                    free(raw); return 1;
+                }
+            }
+        }
+    } else
+        n2_jdlz(d + absoff, enc, raw, dec);
+    /* recover dims by matching the mip-chain byte total: square first (the
+       common case), then rectangular pairs (headlight strips, banners) —
+       orientation of a w!=h tie is unknowable from size alone, so wider-
+       than-tall wins (matches the rect atlases seen in the data). */
+    int tw = 0, th = 0, dxt3 = 0, bestd = 1 << 30;
+    for (int s = 8; s <= 1024; s <<= 1) {
+        int d1 = dec - n2_mipbytes2(s, s, 8), d3 = dec - n2_mipbytes2(s, s, 16);
         if (d1 < 0) d1 = -d1; if (d3 < 0) d3 = -d3;
-        if (d1 < bestd) { bestd = d1; side = s; dxt3 = 0; }
-        if (d3 < bestd) { bestd = d3; side = s; dxt3 = 1; }
+        if (d1 < bestd) { bestd = d1; tw = th = s; dxt3 = 0; }
+        if (d3 < bestd) { bestd = d3; tw = th = s; dxt3 = 1; }
     }
-    if (side == 0 || bestd > 256) { free(raw); return 0; }
-    t->w = side; t->h = side;
-    t->rgb = (unsigned char *)malloc((long)side*side*3);
-    if (dxt3) n2_dxt3(raw, side, side, t->rgb); else n2_dxt1(raw, side, side, t->rgb);
+    if (bestd > 256) {
+        for (int w = 16; w <= 1024; w <<= 1)
+            for (int h = 8; h < w; h <<= 1) {
+                int d1 = dec - n2_mipbytes2(w, h, 8), d3 = dec - n2_mipbytes2(w, h, 16);
+                if (d1 < 0) d1 = -d1; if (d3 < 0) d3 = -d3;
+                if (d1 < bestd) { bestd = d1; tw = w; th = h; dxt3 = 0; }
+                if (d3 < bestd) { bestd = d3; tw = w; th = h; dxt3 = 1; }
+            }
+    }
+    if (tw == 0 || bestd > 256) { free(raw); return 0; }
+    t->w = tw; t->h = th;
+    t->rgb = (unsigned char *)malloc((long)tw*th*3);
+    /* keep DXT3's explicit alpha: it masks the body decals/badges */
+    t->alpha = dxt3 ? (unsigned char *)malloc((long)tw*th) : NULL;
+    if (dxt3) n2_dxt3(raw, tw, th, t->rgb, t->alpha);
+    else      n2_dxt1(raw, tw, th, t->rgb);
     free(raw);
     return 1;
 }
@@ -573,6 +763,7 @@ static int n2_load_texture(const unsigned char *d, long len, const char *name, N
             if (w == 0 || hh == 0 || w > 2048 || hh > 2048) return 0;
             t->w = w; t->h = hh;
             t->rgb = (unsigned char *)malloc((long)w * hh * 3);
+            t->alpha = NULL;
             n2_dxt1(d + pix + off, w, hh, t->rgb);
             return 1;
         }
@@ -649,6 +840,7 @@ static int n2_tpk_decode(const unsigned char *d, long len, N2Tpk t, uint32_t has
             int w = d[i+0x38] | d[i+0x39]<<8, hh = d[i+0x3a] | d[i+0x3b]<<8;
             if (w<=0 || hh<=0 || w>4096 || hh>4096) continue;
             tex->w = w; tex->h = hh; tex->rgb = (unsigned char *)malloc((long)w*hh*3);
+            tex->alpha = NULL;
             if (palsz >= 1024 && dbase+paloff+1024 <= len && dbase+off+(long)w*hh <= len) {
                 const unsigned char *pal = d + dbase + paloff, *ix = d + dbase + off;
                 for (long p = 0; p < (long)w*hh; p++) {   /* P8: index -> RGBA palette */
@@ -657,7 +849,7 @@ static int n2_tpk_decode(const unsigned char *d, long len, N2Tpk t, uint32_t has
                 }
             } else if (dbase + off + (long)w*hh/2 <= len) {
                 int dxt3 = (long)sz > (long)w*hh*9/10;
-                if (dxt3) n2_dxt3(d + dbase + off, w, hh, tex->rgb);
+                if (dxt3) n2_dxt3(d + dbase + off, w, hh, tex->rgb, NULL);
                 else      n2_dxt1(d + dbase + off, w, hh, tex->rgb);
             } else { free(tex->rgb); continue; }
             return 1;

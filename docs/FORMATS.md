@@ -165,6 +165,98 @@ and **closed circuits** (first ≈ last) — the latter are what you lap.
 `ROUTESL4RF/Paths4602.bin` is a small 33-waypoint circuit inside the
 `STREAML4RH` region, used here for the lap demo.
 
+## Engine sound banks (`SOUND/ENGINE/CAR_*_ENG_MB_SPU.abk`)
+
+EA "Ginsu" engine audio: per-car banks of RPM-band loops. Header `ABKC`;
+bank offset `u32 @+0x18`, bank size `u32 @+0x24` → a `BNKl` bank holding
+**PT ("platform") headers**: `'P','T',u16 platform`, then a TLV stream of
+`(tag u8, len u8, big-endian value)` — `0x84` sample rate (default 22050),
+`0x85` sample count, `0x86/0x87` loop start/end, `0x88` data offset
+(bank-relative). Engine banks carry **8 streams**: `[0]` idle, `[1..3]`
+accel low/mid/high, `[4..6]` decel low/mid/high, `[7]` high/whine
+(28 kHz). Verified across all 41 banks.
+
+Stream data is **EA-XA mono ADPCM**, a mix of two frame kinds:
+
+- **15-byte ADPCM frame** = 28 samples. Header byte: coef index in the high
+  nibble, shift in the low. Per 4-bit nibble (high first):
+  `s = ((nib << (20 - shift)) + prev*c1 + prev2*c2 + 0x80) >> 8`, clamped,
+  with `c1 = {0,240,460,392}`, `c2 = {0,0,-208,-220}`.
+- **`0xEE` frame (61 bytes)** = predictor reseed + 28 uncompressed samples:
+  two `s16be` @+1/+3 are the encoder's exact `prev/prev2` seed for the
+  following ADPCM run, then 28 `s16be` output samples @+5.
+
+Both the frame grammar and the decode formula were pinned empirically: the
+byte/sample accounting fits every stream exactly, decode is exact at every
+`0xEE` resync, and the decoded loops come out near-perfectly periodic
+(autocorrelation 0.94-1.00 — they're seamless engine loops).
+
+## Native Ginsu sweeps (`SOUND/ENGINE/GIN_*.gin`) — SOLVED
+
+The authentic per-car engine audio: one continuous recording of the engine
+revving `rpm_min → rpm_max`, **named by car** (`GIN_Hummer`,
+`GIN_Nissan_240SX`, …; `_DCL`/`Decel` variants for coast). There is no
+car→bank table anywhere in the data — car identity lives in these
+filenames (the `CAR_NN` .abk banks are the console-style fallback).
+
+```
++0x00  "Gnsu20\0\0"
++0x08  f32 rpm_min, f32 rpm_max
++0x10  u32 n1 (=50), u32 n2 (=128)
++0x18  u32 total_samples, u32 sample_rate (24000-36000)
++0x20  u32 rpm_pos[n1+1]   // sample position at rpm_min + i*(range/n1);
+                           // DESCENDING in _DCL files (they rev down)
+       u32 grain[n2+1]     // ascending cycle-aligned loop points
+       audio               // EA-XAS v0
+```
+
+**EA-XAS v0** (layout confirmed against vgmstream's `ea_xas_decoder.c`,
+used as a format reference only): 0x13-byte frames of 32 samples. The
+frame's leading `u32` (LE) packs coef index (bits 0-3), **hist2** (bits
+4-15, read as `s16 & 0xFFF0`), shift (bits 16-19), **hist1** (bits 20-31,
+same trick); both history samples are *output*, so every frame decodes
+independently — which is what makes granular grain-jumping seamless. Then
+15 bytes = 30 nibbles, high first:
+`s = ((nib << 12) >> shift) + hist1*c1 + hist2*c2`, clamped, with the
+CD-XA coefficient pairs `c1 = {0, 0.9375, 1.796875, 1.53125}`,
+`c2 = {0, 0, -0.8125, -0.859375}`.
+
+Validated: the local fundamental measured at every `rpm_pos` marker equals
+**rpm/60 Hz** exactly (up to autocorrelation octave picks) — the curve is
+the RPM→position map, and engine fundamental = one cycle per rev. Playback
+= loop the grain window containing `pos(rpm)`, pitch-ratio
+`rpm / rpm_at(grain)`, crossfade accel vs `_DCL` sweep by throttle load.
+
+## Sponsor vinyls (`CARS/*/VINYLS.BIN`) and EA "HUFF" compression — SOLVED
+
+`VINYLS.BIN` is one big compressed TPK (same offset-slot container as
+`TEXTURES.BIN`), but every slot's blob is **EA "HUFF"**: a 16-byte wrapper
+(`"HUFF"`, u32 version 0x1001, u32 decSize LE, u32 encSize LE) around an
+**EAC canonical-Huffman stream** (signature `30FBh`, part of the same EA
+Canada codec family as RefPack `10FBh`). Some `TEXTURES.BIN` slots use the
+same wrapper around raw DXT payloads.
+
+**EAC Huffman** (per Martin Korth's spec at problemkaputt.de/psx-spx.htm,
+"CDROM File Compression EA Methods (Huffman)"; implemented from the spec
+as `n2_huff` in nfsu2.h): big-endian bitstream; u16 method 30FBh..35FBh
+(+3 skip bytes if bit8), u24 decompressed size, u8 escape code; canonical
+code widths read until the Kraft sum fills the 16-bit code space; symbol
+values delta-assigned over not-yet-used bytes; decode loop = literal
+symbols, with ESC + varint n meaning {n=0: EOS bit or raw 8-bit literal;
+n>0: repeat previous byte n times} — the run mechanism that gives vinyls
+their ~60:1 ratios. Methods 32FBh/34FBh add prefix-sum unfiltering.
+Varint = count zero bits z, then read (z+2) bits + (1<<(z+2)) - 4.
+
+**Vinyl payload** = P8-style 8-bit indices (w*h base + mip levels) + a
+256-entry RGBA palette + a 144-byte trailing record: `name[24]` (e.g.
+`GOLF_AEM_SCORPION`), key u32 @+0x18, palette offset/size @+0x2c/+0x30,
+pixel size @+0x34, width/height u16 @+0x38. **The palette ships all-zero**
+— vinyls are runtime-recolored from the player's chosen colours (the ~16
+used indices are art shade levels; the most frequent index is the
+transparent background). The engine synthesizes a dark cut-vinyl look and
+composites the art under the badge atlas across the whole body (body
+panels share one UV layout; most carry no texture key of their own).
+
 ## The retail executable
 
 `speed2.exe` is packed with **SafeDisc** DRM (section names `stxt774`/`stxt371`,
@@ -192,3 +284,6 @@ independent implementation.
   the P8 road-surface textures (which had otherwise looked like noise).
 - **[OpenNFSTools](https://github.com/MWisBest/OpenNFSTools)** — reference for
   the JDLZ decompression algorithm.
+- **[vgmstream](https://github.com/vgmstream/vgmstream)** — reference for the
+  Gnsu20 table layout and the EA-XAS v0 frame format (`meta/gin.c`,
+  `coding/ea_xas_decoder.c`).
