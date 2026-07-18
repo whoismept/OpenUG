@@ -156,7 +156,7 @@ static int n2_mesh_category(const unsigned char *d, long beg, long end) {
 static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
                         int cat, N2Scene *scene,
                         int stride, int uvoff, int cull_skybox, uint32_t texkey,
-                        const float *mtx) {
+                        const float *mtx, long istart, long icount) {
     const unsigned char *vb = d + vtx.off;
     int vlen = (int)vtx.size;
     int pad = n2_skip_filler(vb, vlen);
@@ -203,6 +203,15 @@ static void n2_add_pair(const unsigned char *d, N2Leaf vtx, N2Leaf idx,
     while (ip + 2 <= ibytes && ib0[ip] == 0x11 && ib0[ip+1] == 0x11) ip += 2;
     const unsigned char *ib = ib0 + ip;
     int nidx = (ibytes - ip) / 2;
+    /* icount >= 0 restricts this draw to one 0x134B02 submesh's slice of the
+       index buffer (its own material). Ranges are in u16s past the filler. */
+    if (icount >= 0) {
+        if (istart < 0 || istart >= nidx) return;
+        if (istart + icount > nidx) icount = nidx - istart;
+        if (icount < 3) return;
+        ib += istart * 2;
+        nidx = (int)icount;
+    }
     m.idx = (uint16_t *)malloc(nidx * sizeof(uint16_t));
     m.nidx = 0;
     for (int i = 0; i + 2 < nidx; i += 3) {
@@ -281,7 +290,7 @@ static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *
                cull that still guards every other category. */
             int cull = (cat != N2_SKY);
             for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, cull, tk, objm);
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, cull, tk, objm, 0, -1);
         } else if (magic != 0 && (magic >> 28) == 8) {
             n2_walk_meshes(d, ds, ds + size, scene, keys, nkeys);
         }
@@ -525,6 +534,57 @@ static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
     return 0;
 }
 
+/* Every key in a mesh's 0x134012 slot list, BY SLOT INDEX (8-byte entries:
+ * key + 0), including keys this car's TPK can't resolve — the index is what
+ * a 0x134B02 record's mat_id refers to, so gaps must keep their position. */
+static int n2_mesh_texslots(const unsigned char *d, long beg, long end,
+                            uint32_t *out, int cap) {
+    N2Leaf t12[4]; int n12 = 0, n = 0;
+    n2_find_leaves(d, beg, end, 0x00134012u, t12, &n12, 4);
+    for (int a = 0; a < n12; a++) {
+        const unsigned char *p = d + t12[a].off; long ls = t12[a].size;
+        for (long b = 0; b + 8 <= ls && n < cap; b += 8) out[n++] = n2_u32(p + b);
+    }
+    return n;
+}
+
+static uint32_t n2_resolve_key(uint32_t v, const uint32_t *keys, int nkeys) {
+    if (!v) return 0;
+    for (int i = 0; i < nkeys; i++) if (keys[i] == v) return v;
+    return 0;   /* lives in a pack we don't ship — caller falls back to paint */
+}
+
+/* One 0x134B02 record = one material slice of the index buffer. Layout,
+ * decoded from MIATA_KIT00_FRONT_BUMPER_A and cross-checked on BODY_A
+ * (60 bytes, after the usual 0x11 filler):
+ *   +0  bbox min xyz (3 floats)      +12 index count
+ *   +16 bbox max xyz (3 floats)      +28 mat_id  = index into the 0x134012
+ *                                                  slot list above
+ *   +32 render-state flag            +52 index start
+ * The starts/counts chain exactly across the buffer (0->39->1065->1083 =
+ * 1143 = the whole index list), which is what confirms the field roles.
+ * mat_id is NOT the same field as the flag at +32: BODY_A's last record has
+ * mat_id 1 but flag 2, and BODY_A only HAS two slots. */
+typedef struct { uint32_t start, count, mat; } N2Sub;
+static int n2_mesh_submeshes(const unsigned char *d, long beg, long end,
+                             N2Sub *out, int cap) {
+    N2Leaf sm[4]; int nsm = 0;
+    n2_find_leaves(d, beg, end, 0x00134B02u, sm, &nsm, 4);
+    if (nsm != 1) return 0;                     /* only the simple case */
+    const unsigned char *p = d + sm[0].off; long ls = sm[0].size;
+    int pad = n2_skip_filler(p, (int)ls);
+    long body = ls - pad;
+    if (body <= 0 || body % 60 || body / 60 > cap) return 0;
+    int n = (int)(body / 60);
+    for (int i = 0; i < n; i++) {
+        const unsigned char *q = p + pad + i*60;
+        out[i].count = n2_u32(q + 12);
+        out[i].mat   = n2_u32(q + 28);
+        out[i].start = n2_u32(q + 52);
+    }
+    return n;
+}
+
 /* Parse a car GEOMETRY.BIN (36-byte verts w/ normals), tagging each mesh with
  * a class from its material name and its per-mesh diffuse texture key.
  *
@@ -572,13 +632,51 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + s, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
-            for (int k = 0; k < pairs; k++) {   /* car parts have identity transforms */
-                int before = scene->count;
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk, NULL);
-                if (scene->count > before) {
-                    scene->meshes[before].trim = trim;
-                    scene->meshes[before].roof = roof;
-                    scene->meshes[before].namekey = nk2;
+
+            /* Per-submesh material routing. One object can mix materials: a
+               bumper is mostly body paint with a small badge patch, and its
+               0x134012 list carries a key per material. Binding the ONE key
+               we can resolve to the whole object smears the badge atlas over
+               the entire panel (MIATA's front bumper: the badge owns 18 of
+               1143 indices, 1.6%, but was painting 100% of it dark). So when
+               the records actually resolve to different textures, emit one
+               mesh per record instead. */
+            uint32_t slots[16]; int nslot = n2_mesh_texslots(d, ds, ds + s, slots, 16);
+            N2Sub sub[32]; int nsub = pairs == 1 ? n2_mesh_submeshes(d, ds, ds + s, sub, 32) : 0;
+            uint32_t subtex[32]; int differ = 0, big = 0;
+            for (int k = 0; k < nsub; k++) {
+                subtex[k] = sub[k].mat < (uint32_t)nslot
+                          ? n2_resolve_key(slots[sub[k].mat], keys, nkeys) : 0;
+                if (subtex[k] != subtex[0]) differ = 1;
+                if (sub[k].count > sub[big].count) big = k;
+            }
+            if (nsub > 1 && differ) {
+                for (int k = 0; k < nsub; k++) {
+                    int before = scene->count;
+                    n2_add_pair(d, vtx[0], idx[0], cat, scene, 36, 28, 0,
+                                subtex[k], NULL, sub[k].start, sub[k].count);
+                    if (scene->count > before) {
+                        scene->meshes[before].trim = trim;
+                        scene->meshes[before].roof = roof;
+                        /* The dominant slice keeps the plain family key so it
+                           still dedupes against LOD tiers that never split
+                           (a lower tier can lack the badge slot entirely, so
+                           it stays whole); the small extra slices get their
+                           own keys and only ever match the same slice of
+                           another tier. */
+                        scene->meshes[before].namekey =
+                            k == big ? nk2 : nk2 ^ (0x9e3779b9u * (sub[k].mat + 1));
+                    }
+                }
+            } else {
+                for (int k = 0; k < pairs; k++) {   /* car parts have identity transforms */
+                    int before = scene->count;
+                    n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk, NULL, 0, -1);
+                    if (scene->count > before) {
+                        scene->meshes[before].trim = trim;
+                        scene->meshes[before].roof = roof;
+                        scene->meshes[before].namekey = nk2;
+                    }
                 }
             }
         } else if (m != 0 && (m >> 28) == 8) {
