@@ -56,7 +56,15 @@ static const char *FS =
        must counter-rotate the light or its lit side turns with it. */
     "  vec3 L=normalize(uLight); vec3 N=normalize(vN);\n"
     "  vec3 V=normalize(uCamPos - vPos);\n"
-    "  float d=uAmbient+uDiffuse*max(dot(N,L),0.0);\n"   /* directional; reveals body form */
+    "  float nl=max(dot(N,L),0.0);\n"
+    "  float d=uAmbient+uDiffuse*nl;\n"   /* directional; reveals body form */
+    /* uAmbient/uDiffuse are one shared per-frame pair (world+cars both read
+       them), so retuning the defaults to fix a car panel would also retune
+       every building and road. Cars get their own lower ambient floor /
+       sharper diffuse swing right here instead, gated the same way as the
+       cavity term above — world batches always set uSpec=0, so they never
+       take this branch. */
+    "  if(uSpec>0.001) d=uAmbient*0.55+uDiffuse*1.2*nl;\n"
     /* uDecal: paint under an alpha-masked decal atlas (badges/vinyls) —
        texture RGB shows only where its alpha says so, paint elsewhere */
     "  vec4 t = texture2D(uTex,vUV);\n"
