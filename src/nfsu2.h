@@ -369,6 +369,36 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
     return 0;
 }
 
+/* LOD proxy suffix: every part family in this data (BASE, BODY, BUMPER,
+ * ROOF, DOOR, WHEEL, HEADLIGHT, BRAKELIGHT — checked across MIATA and GOLF)
+ * repeats as NAME_A/NAME_B/NAME_C(/NAME_D), all sharing the SAME bounding
+ * box with monotonically decreasing vertex counts (e.g. MIATA's headlight
+ * _C is a 13-vertex stub) — a classic LOD chain, not simultaneous parts.
+ * n2_car_is_variant doesn't touch these at all, so _B/_C/_D currently load
+ * and render stacked directly inside the _A shell. Verified fleet-wide
+ * (57/57 cars) that every _B/_C/_D has an _A sibling, so dropping them
+ * never leaves a part missing. */
+static int n2_car_is_lod_proxy(const unsigned char *d, long beg, long end) {
+    N2Leaf mat[4]; int nm = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
+    for (int k = 0; k < nm; k++) {
+        const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        for (long i = 0; i + 5 < s; i++) {
+            if (p[i] >= 'A' && p[i] <= 'Z') {
+                long j = i;
+                while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
+                if (j - i >= 5) {
+                    long L = j - i;
+                    return L >= 2 && p[i+L-2]=='_' &&
+                           (p[i+L-1]=='B' || p[i+L-1]=='C' || p[i+L-1]=='D');
+                }
+                i = j;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Plastic trim within N2_CAR_BODY: bumpers and rocker skirts are moulded
  * polyurethane, not the metal body shell, and carry their own name tokens
  * (verified real, fleet-wide: MIATA/GOLF/HUMMER/350Z/SKYLINE all have
@@ -453,6 +483,7 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
         long ds = o + 8;
         if (m == 0x80134010u) {
             if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
+            if (n2_car_is_lod_proxy(d, ds, ds + s)) { o = ds + s; continue; }  /* _A only */
             int cat = n2_car_category(d, ds, ds + s);
             int trim = cat == N2_CAR_BODY && n2_car_is_trim(d, ds, ds + s);
             int roof = cat == N2_CAR_BODY && !trim && n2_car_is_roof(d, ds, ds + s);
