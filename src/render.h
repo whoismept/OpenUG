@@ -79,6 +79,7 @@ RProg    render_program(void);          /* compile+link the shader, fetch unifor
 GpuMesh *upload_scene(N2Scene *s);      /* VBO/NBO/IBO per mesh, normals computed */
 GpuMesh  make_wheel(float R, float halfW);  /* procedural tyre (see render.c) */
 GLuint   make_wheel_tex(void);          /* radial alloy-rim texture for it */
+GLuint   make_wheel_blur_tex(void);     /* same rim, angular-averaged (spinning) */
 GpuMesh  make_quad(void);               /* unit quad for HUD / billboards */
 void     draw_gpumesh(GpuMesh *g);
 

@@ -209,6 +209,7 @@ int main(int argc, char **argv) {
     uint32_t mapkey[32]; GLuint maptex[32]; char mapalpha[32]; int nmap = 0;
     N2Scene car; int ncar = 0; GpuMesh *cgm = NULL;
     float wheelT[4][16];                         /* 4 wheel placements (car-local) */
+    float wheelTAI[4][16];                       /* same, minus the player's steer (AI cars) */
     GpuMesh wheelmesh; int have_wheel = 0;       /* procedural tyre, built after GL init */
     for (int k=0;k<4;k++){ float I[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; memcpy(wheelT[k],I,sizeof(I)); }
     float carbb[6] = {0,0,0,0,0,0};              /* body AABB min/max, for wheel placement */
@@ -368,6 +369,13 @@ int main(int argc, char **argv) {
 
     GLuint texTerr = world.have_grass ? upload_tex(&world.grass) : 0;
     GLuint texWheel = make_wheel_tex();   /* radial alloy-rim look for the tyres */
+    /* Above ~40 km/h the 5-spoke pattern is turning faster than the frame rate
+       can sample, so crisp spokes alias into a strobing mess. Swap to the
+       angular-averaged rim then — a stand-in for the pre-baked blur asset
+       retail used, which is NOT present in this data: no _BLUR key exists in
+       any per-car TEXTURES.BIN. */
+    GLuint texWheelBlur = make_wheel_blur_tex();
+    #define WHEEL_BLUR_KMH 40.0f
 
     /* static world -> per-(cell,texture) interleaved batches; the CPU-side
        scene stays alive for the physics/ground queries */
@@ -805,15 +813,32 @@ int main(int argc, char **argv) {
                the discs spin with road speed (visible via the radial rim tex) */
             { static float wang = 0.0f;
               float wR = g_dbg.wheel_scale > 0.05f ? 0.33f*g_dbg.wheel_scale : 0.33f;
-              wang += speed / wR * (1.0f/60.0f);
+              wang += speed / wR * (1.0f/60.0f);          /* w = v/r, integrated */
               if (wang > 6.2831853f) wang -= 6.2831853f;
               float c = cosf(wang), sn = sinf(wang);
+              /* visual steer: ease the raw -1/0/1 key state toward a ~28 deg
+                 lock so the front wheels swing smoothly instead of snapping.
+                 Rotation is about the wheel's own centre (the mesh is modelled
+                 at the origin and the arch position lives in the translation
+                 column), so steering can't swing it out of the arch. */
+              static float vsteer = 0.0f;
+              vsteer += (steer*0.50f - vsteer) * 0.25f;
+              float sc = cosf(vsteer), ss = sinf(vsteer);
               float fr=carbb[3]*g_dbg.wheel_frontf, rr=carbb[0]*g_dbg.wheel_rearf,
                     tr=carbb[4]*g_dbg.wheel_trackf, s=g_dbg.wheel_scale, wz=g_dbg.wheel_z;
               float wp[4][2]={{fr,tr},{fr,-tr},{rr,tr},{rr,-tr}};
               for(int k=0;k<4;k++){ float sy=(k&1)?-s:s;
+                  /* rear axle: plain scale * rotY(wang) */
                   float M[16]={s*c,0,-s*sn,0, 0,sy,0,0, s*sn,0,s*c,0,
-                               wp[k][0],wp[k][1],wz,1};   /* scale * rotY(wang) */
+                               wp[k][0],wp[k][1],wz,1};
+                  memcpy(wheelTAI[k],M,sizeof(M));   /* unsteered: AI reuse these */
+                  if (k < 2) {   /* front axle: rotZ(steer) * that, per column */
+                      float m2[16]={ s*c*sc,  s*c*ss,  -s*sn, 0,
+                                     -sy*ss,  sy*sc,    0,    0,
+                                     s*sn*sc, s*sn*ss,  s*c,  0,
+                                     wp[k][0], wp[k][1], wz,  1 };
+                      memcpy(M, m2, sizeof M);
+                  }
                   memcpy(wheelT[k],M,sizeof(M)); } }
             float *pnt = g_dbg.paint_override ? g_dbg.paint : paint;
             /* uUnlit/uSoft were left ON (1.0) by the shadow/headlight-glow/
@@ -928,7 +953,11 @@ int main(int argc, char **argv) {
             if (have_wheel && g_dbg.show_tires) {
                 glUniform1f(rp.uDecal, 0.0f); glUniform1f(uSpec, 0.4f);
                 glUniform1f(rp.uEnv, 0.3f);   /* alloy sheen on the rims */
-                glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, texWheel);
+                glUniform1f(uUseTex, 1.0f);
+                /* PHYS_KMH(speed), not g_dbg.kmh: that mirror is only written
+                   at the end of the frame, so reading it here lags a frame. */
+                glBindTexture(GL_TEXTURE_2D,
+                              PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur : texWheel);
                 for (int k=0;k<4;k++){ float MVPw[16]; mat_mul(MVPc, wheelT[k], MVPw);
                     glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw); draw_gpumesh(&wheelmesh); }
                 g_dbg.drawn += 4;
@@ -955,7 +984,7 @@ int main(int argc, char **argv) {
                     if (cgm[i].cat != N2_CAR_TIRE) { draw_gpumesh(&cgm[i]); g_dbg.drawn++; }
                 if (have_wheel && g_dbg.show_tires) {     /* procedural tyres */
                     glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, texWheel);
-                    for (int w=0;w<4;w++){ float MVPw[16]; mat_mul(MVPc, wheelT[w], MVPw);
+                    for (int w=0;w<4;w++){ float MVPw[16]; mat_mul(MVPc, wheelTAI[w], MVPw);
                         glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw); draw_gpumesh(&wheelmesh); }
                     g_dbg.drawn += 4;
                     glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPc);
