@@ -86,6 +86,10 @@ void     draw_gpumesh(GpuMesh *g);
  * is left untouched (physics reads it). Returns the batch count. */
 int  upload_world_batches(const N2Scene *s, const float (*mbb)[4],
                           const GLuint *mtex, GLuint texTerr, N2Batch **out);
+/* Same merge, but for one category (N2_SKY / N2_GLOW) pulled out of the main
+ * batching pass above — grouped by texture only, no spatial cell/cull grid,
+ * since there are only ever a handful of skybox/neon meshes per city. */
+int  upload_cat_batches(const N2Scene *s, int cat, const GLuint *mtex, N2Batch **out);
 void draw_batch(const N2Batch *b);
 GLuint   upload_tex(const N2Tex *t);
 

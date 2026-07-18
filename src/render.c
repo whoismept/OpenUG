@@ -287,34 +287,67 @@ int upload_world_batches(const N2Scene *s, const float (*mbb)[4],
         if (mbb[i][0] < x0) x0 = mbb[i][0];
         if (mbb[i][1] < y0) y0 = mbb[i][1];
     }
-    /* sort meshes by (cell, resolved texture) */
+    /* sort meshes by (cell, resolved texture) — sky/glow meshes are pulled by
+       upload_cat_batches instead: batching them in here would let an ordinary
+       cell+texture run silently absorb a skybox shell or a neon sign, so
+       they'd draw with the wrong depth/blend state at the wrong time. */
     BSortEnt *ent = (BSortEnt *)malloc((size_t)n * sizeof *ent);
+    int m = 0;
     for (int i = 0; i < n; i++) {
-        const N2Mesh *m = &s->meshes[i];
+        const N2Mesh *mesh = &s->meshes[i];
+        if (mesh->cat == N2_SKY || mesh->cat == N2_GLOW) continue;
         GLuint tex = mtex[i];
-        if (!tex && m->cat == N2_TERRAIN) tex = texTerr;   /* fallback baked in */
+        if (!tex && mesh->cat == N2_TERRAIN) tex = texTerr;   /* fallback baked in */
         float cx = (mbb[i][0]+mbb[i][2])*0.5f, cy = (mbb[i][1]+mbb[i][3])*0.5f;
         uint64_t cell = (uint64_t)(uint32_t)((int)((cy-y0)/BATCH_CELL)*4096
                                            + (int)((cx-x0)/BATCH_CELL));
-        ent[i].key = cell << 32 | tex; ent[i].idx = i;
+        ent[m].key = cell << 32 | tex; ent[m].idx = i; m++;
     }
-    qsort(ent, (size_t)n, sizeof *ent, bsort_cmp);
+    qsort(ent, (size_t)m, sizeof *ent, bsort_cmp);
     /* walk key runs, splitting a run at the u16 vertex ceiling */
     int cap = 256, nb = 0;
     N2Batch *bat = (N2Batch *)malloc((size_t)cap * sizeof *bat);
     int i0 = 0, verts = 0;
-    for (int i = 0; i <= n; i++) {
-        int flush = (i == n) || (i > i0 && ent[i].key != ent[i0].key) ||
+    for (int i = 0; i <= m; i++) {
+        int flush = (i == m) || (i > i0 && ent[i].key != ent[i0].key) ||
                     (i > i0 && verts + s->meshes[ent[i].idx].nverts > BATCH_MAXVERTS);
         if (flush && i > i0) {
             if (nb == cap) { cap *= 2; bat = (N2Batch *)realloc(bat, (size_t)cap * sizeof *bat); }
             batch_emit(s, ent, i0, i, (GLuint)(ent[i0].key & 0xffffffffu), &bat[nb++]);
             i0 = i; verts = 0;
         }
-        if (i < n) verts += s->meshes[ent[i].idx].nverts;
+        if (i < m) verts += s->meshes[ent[i].idx].nverts;
     }
     free(ent);
     qsort(bat, (size_t)nb, sizeof *bat, btex_cmp);   /* minimise texture binds */
+    *out = bat;
+    return nb;
+}
+
+/* Same merge as above but for exactly one category, grouped by texture only
+ * (no spatial grid — a city has a handful of skybox/neon meshes, not tens of
+ * thousands, so there's nothing for a cell split to buy here). */
+int upload_cat_batches(const N2Scene *s, int cat, const GLuint *mtex, N2Batch **out) {
+    int n = s->count;
+    BSortEnt *ent = (BSortEnt *)malloc((size_t)(n ? n : 1) * sizeof *ent);
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (s->meshes[i].cat == cat) { ent[m].key = mtex[i]; ent[m].idx = i; m++; }
+    qsort(ent, (size_t)m, sizeof *ent, bsort_cmp);
+    int cap = 8, nb = 0;
+    N2Batch *bat = (N2Batch *)malloc((size_t)cap * sizeof *bat);
+    int i0 = 0, verts = 0;
+    for (int i = 0; i <= m; i++) {
+        int flush = (i == m) || (i > i0 && ent[i].key != ent[i0].key) ||
+                    (i > i0 && verts + s->meshes[ent[i].idx].nverts > BATCH_MAXVERTS);
+        if (flush && i > i0) {
+            if (nb == cap) { cap *= 2; bat = (N2Batch *)realloc(bat, (size_t)cap * sizeof *bat); }
+            batch_emit(s, ent, i0, i, (GLuint)ent[i0].key, &bat[nb++]);
+            i0 = i; verts = 0;
+        }
+        if (i < m) verts += s->meshes[ent[i].idx].nverts;
+    }
+    free(ent);
     *out = bat;
     return nb;
 }

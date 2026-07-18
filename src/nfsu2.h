@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 /* One drawable submesh: interleaved [px,py,pz,u,v] verts + u16 triangle list. */
-enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2, N2_SKY = 3,
+enum { N2_ROAD = 0, N2_TERRAIN = 1, N2_OTHER = 2, N2_SKY = 3, N2_GLOW = 4,
        /* car mesh classes, from material name */
        N2_CAR_BODY = 10, N2_CAR_GLASS = 11, N2_CAR_LIGHT = 12,
        N2_CAR_TIRE = 13, N2_CAR_MISC = 14, N2_CAR_BRAKELIGHT = 15, N2_CAR_MECH = 16 };
@@ -86,6 +86,26 @@ static int n2_contains(const unsigned char *hay, long n, const char *needle) {
     return 0;
 }
 
+/* case-insensitive substring search: retail's world-object material names
+ * are NOT uniformly cased like the ROAD/TERRAIN/SKY prefixes below — e.g.
+ * "XO_BulbAOrange_1a_00", "XB_CasinoF_Neon_1a_LL_00" — so glow/neon/flare
+ * detection can't reuse the uppercase-run scan those checks rely on. */
+static int n2_icontains(const unsigned char *hay, long n, const char *needle) {
+    long m = (long)strlen(needle);
+    for (long i = 0; i + m <= n; i++) {
+        long k = 0;
+        while (k < m) {
+            unsigned char a = hay[i+k], b = (unsigned char)needle[k];
+            if (a >= 'a' && a <= 'z') a -= 32;
+            if (b >= 'a' && b <= 'z') b -= 32;
+            if (a != b) break;
+            k++;
+        }
+        if (k == m) return 1;
+    }
+    return 0;
+}
+
 /* Classify a 0x80134010 mesh by the material name in its first 0x134011 leaf.
  * Names look like TRN_ROADA_CHOP_*, TRN_TERRAINA_*, XO_TRAFFICCONE_* ... */
 static int n2_mesh_category(const unsigned char *d, long beg, long end) {
@@ -93,6 +113,15 @@ static int n2_mesh_category(const unsigned char *d, long beg, long end) {
     n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
     for (int k = 0; k < nm; k++) {
         const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        /* neon signs, bulbs, lens flares: real light *emitters*, distinct
+         * from opaque fixtures (StreetLightCbWALL, LightPoleB, TrafficLightC
+         * are the pole/housing mesh — matching bare LIGHT/LAMP would also
+         * catch those and wrongly make solid poles additive-transparent).
+         * Checked case-insensitively: unlike SKY/ROAD/TERRAIN below, retail
+         * casing for these is inconsistent per-region (mixed vs. upper). */
+        if (n2_icontains(p, s, "NEON") || n2_icontains(p, s, "GLOW") ||
+            n2_icontains(p, s, "FLARE") || n2_icontains(p, s, "BULB"))
+            return N2_GLOW;
         for (long i = 0; i + 5 < s; i++) {
             /* start of an uppercase A-Z name run */
             if (p[i] >= 'A' && p[i] <= 'Z') {
@@ -231,15 +260,18 @@ static void n2_walk_meshes(const unsigned char *d, long beg, long end, N2Scene *
         long ds = o + 8;
         if (magic == 0x80134010u) {
             int cat = n2_mesh_category(d, ds, ds + size);
-            if (cat == N2_SKY) { o = ds + size; continue; }   /* drop the skybox by name */
             uint32_t tk = n2_mesh_texkey_cat(d, ds, ds + size, cat, keys, nkeys);
             float objm[16]; n2_obj_matrix(d, ds, ds + size, objm);   /* world placement */
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + size, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + size, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
+            /* the skybox shell is kept now (Phase 21: rendered camera-locked,
+               depth-write off) so its absurd span must skip the size-safety
+               cull that still guards every other category. */
+            int cull = (cat != N2_SKY);
             for (int k = 0; k < pairs; k++)
-                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, 1, tk, objm);
+                n2_add_pair(d, vtx[k], idx[k], cat, scene, 24, 16, cull, tk, objm);
         } else if (magic != 0 && (magic >> 28) == 8) {
             n2_walk_meshes(d, ds, ds + size, scene, keys, nkeys);
         }

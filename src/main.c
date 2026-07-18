@@ -371,6 +371,17 @@ int main(int argc, char **argv) {
 
     /* static world -> per-(cell,texture) interleaved batches; the CPU-side
        scene stays alive for the physics/ground queries */
+    /* Phase 21: skybox + neon/glow are pulled into their own batch lists so
+       they can get their own draw pass (camera-locked/depth-off for the
+       sky, additive-blended at frame end for neon) instead of blending into
+       the ordinary opaque city batches. Print a note if a region genuinely
+       has no SKYDOME mesh — the shader just falls back to the flat fog
+       clear colour, which is correct but worth knowing about. */
+    N2Batch *skybatch = NULL; int nsky = upload_cat_batches(&scene, N2_SKY, mtex, &skybatch);
+    N2Batch *glowbatch = NULL; int nglow = upload_cat_batches(&scene, N2_GLOW, mtex, &glowbatch);
+    printf("sky: %d batch(es)%s, neon/glow: %d batch(es)\n", nsky,
+           nsky ? "" : " (no SKYDOME mesh found in this region set)", nglow);
+
     N2Batch *wbatch = NULL;
     int nbatch = upload_world_batches(&scene, (const float (*)[4])world.mbb,
                                       mtex, texTerr, &wbatch);
@@ -648,6 +659,33 @@ int main(int argc, char **argv) {
         glUniform1f(uUnlit, 0.0f); glUniform1f(uSpec, 0.0f);   /* world is matte */
         glUniform1f(uAmbient, g_dbg.ambient); glUniform1f(uDiffuse, g_dbg.diffuse);
         glUniform3f(uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);   /* track = world space */
+
+        /* skybox: drawn first, camera-locked (view built from a zero eye so
+           translation drops out — the classic "at infinity" trick) and with
+           depth-write off so every real batch below still overdraws it via
+           the depth test alone. Falls back to nothing (flat fog clear
+           colour shows through) when the region has no SKYDOME mesh. */
+        if (nsky) {
+            float zero[3] = {0,0,0}, Vsky[16], MVPsky[16];
+            mat_lookat(zero, look, Vsky);
+            mat_mul(P, Vsky, MVPsky);
+            glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVPsky);
+            glUniform1f(uUnlit, 1.0f);
+            glDepthMask(GL_FALSE);
+            GLuint lastskytex = (GLuint)-1;
+            for (int k = 0; k < nsky; k++) {
+                N2Batch *b = &skybatch[k];
+                if (b->tex != lastskytex) {
+                    if (b->tex) { glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, b->tex); }
+                    else { glUniform1f(uUseTex, 0.0f); glUniform3f(uColor, g_dbg.fog_r, g_dbg.fog_g, g_dbg.fog_b); }
+                    lastskytex = b->tex;
+                }
+                draw_batch(b);
+                g_dbg.drawn++;
+            }
+            glDepthMask(GL_TRUE); glUniform1f(uUnlit, 0.0f);
+            glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP);   /* restore the real camera */
+        }
 
         /* track: one draw per visible (cell,texture) batch, texture-sorted so
            binds are rare; terrain fallback + untextured-gray are baked into
@@ -968,6 +1006,30 @@ int main(int argc, char **argv) {
                 g_dbg.drawn++;
             }
             glUniform1f(uAlpha,1.0f); glUniform1f(uSoft,0.0f); glDepthMask(GL_TRUE); glDisable(GL_BLEND);
+        }
+
+        /* neon signs / bulbs / lens flares: additive pass at the very end of
+           the 3D frame, using each mesh's own texture as its emissive colour
+           (these never receive diffuse lighting in-game — they ARE the
+           light). Depth test stays on (a sign behind a building must still
+           be occluded); only the write is off, so overlapping glows blend
+           into each other instead of fighting on depth. */
+        if (nglow && g_dbg.show_track) {
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glDepthMask(GL_FALSE);
+            glUniform1f(uUnlit, 1.0f);
+            GLuint lastglowtex = (GLuint)-1;
+            for (int k = 0; k < nglow; k++) {
+                N2Batch *b = &glowbatch[k];
+                if (b->tex != lastglowtex) {
+                    if (b->tex) { glUniform1f(uUseTex, 1.0f); glBindTexture(GL_TEXTURE_2D, b->tex); }
+                    else { glUniform1f(uUseTex, 0.0f); glUniform3f(uColor, 1.0f, 0.85f, 0.5f); }
+                    lastglowtex = b->tex;
+                }
+                draw_batch(b);
+                g_dbg.drawn++;
+            }
+            glUniform1f(uUnlit, 0.0f); glDepthMask(GL_TRUE); glDisable(GL_BLEND);
         }
 
         /* HUD: race-position leaderboard — one colour bar per car, ordered by
