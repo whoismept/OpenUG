@@ -29,6 +29,9 @@ typedef struct {
                           (verified real token, e.g. MIATA_KIT00_ROOF_A) — canvas,
                           not painted metal: fixed dark colour, ignores player
                           paint, near-zero specular/reflection */
+    uint32_t namekey; /* car meshes: hash of the part name with any trailing
+                          _A.._D LOD suffix stripped, so every tier of one part
+                          shares a key. 0 = unnamed. Drives n2_car_dedupe_lod. */
 } N2Mesh;
 
 typedef struct {
@@ -369,16 +372,18 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
     return 0;
 }
 
-/* LOD proxy suffix: every part family in this data (BASE, BODY, BUMPER,
- * ROOF, DOOR, WHEEL, HEADLIGHT, BRAKELIGHT — checked across MIATA and GOLF)
- * repeats as NAME_A/NAME_B/NAME_C(/NAME_D), all sharing the SAME bounding
- * box with monotonically decreasing vertex counts (e.g. MIATA's headlight
- * _C is a 13-vertex stub) — a classic LOD chain, not simultaneous parts.
- * n2_car_is_variant doesn't touch these at all, so _B/_C/_D currently load
- * and render stacked directly inside the _A shell. Verified fleet-wide
- * (57/57 cars) that every _B/_C/_D has an _A sibling, so dropping them
- * never leaves a part missing. */
-static int n2_car_is_lod_proxy(const unsigned char *d, long beg, long end) {
+/* LOD family key: FNV-1a of the part name with any trailing _A.._D suffix
+ * stripped, so every tier of one part hashes alike.
+ *
+ * Car geometry stores each part several times at descending detail. MOST
+ * families spell the tier as a suffix (BASE_A/_B/_C, BODY_A.._D, WHEEL_A..),
+ * but NOT all: the name field is a fixed-width buffer, and parts with long
+ * names have the suffix truncated off entirely — MIATA_KIT00_HEADLIGHT_LEFT_
+ * and both side mirrors are byte-identical across all three of their tiers
+ * (verified by raw hex dump). So a suffix test alone cannot see those, which
+ * is why they kept rendering stacked. Hashing the stripped name groups both
+ * spellings; n2_car_dedupe_lod then resolves each group spatially. */
+static uint32_t n2_car_name_key(const unsigned char *d, long beg, long end) {
     N2Leaf mat[4]; int nm = 0;
     n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
     for (int k = 0; k < nm; k++) {
@@ -387,16 +392,91 @@ static int n2_car_is_lod_proxy(const unsigned char *d, long beg, long end) {
             if (p[i] >= 'A' && p[i] <= 'Z') {
                 long j = i;
                 while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
-                if (j - i >= 5) {
-                    long L = j - i;
-                    return L >= 2 && p[i+L-2]=='_' &&
-                           (p[i+L-1]=='B' || p[i+L-1]=='C' || p[i+L-1]=='D');
+                long L = j - i;
+                if (L >= 5) {
+                    if (p[i+L-2] == '_' && p[i+L-1] >= 'A' && p[i+L-1] <= 'D') L -= 2;
+                    uint32_t h = 2166136261u;
+                    for (long q = 0; q < L; q++) { h ^= p[i+q]; h *= 16777619u; }
+                    return h ? h : 1u;          /* 0 is reserved for "unnamed" */
                 }
                 i = j;
             }
         }
     }
     return 0;
+}
+
+static void n2_mesh_bbox(const N2Mesh *m, float *bb) {
+    bb[0]=bb[2]=bb[4] = 1e30f; bb[1]=bb[3]=bb[5] = -1e30f;
+    for (int v = 0; v < m->nverts; v++) {
+        const float *p = m->verts + v*5;
+        for (int c = 0; c < 3; c++) {
+            if (p[c] < bb[2*c])   bb[2*c]   = p[c];
+            if (p[c] > bb[2*c+1]) bb[2*c+1] = p[c];
+        }
+    }
+}
+
+/* Intersection volume as a fraction of the SMALLER box. 0 when disjoint, or
+ * when either box is degenerate (a flat quad has zero volume) — that case
+ * errs toward keeping both meshes, which is the safe direction. */
+static float n2_bbox_overlap(const float *a, const float *b) {
+    float ov = 1.0f, va = 1.0f, vb = 1.0f;
+    for (int c = 0; c < 3; c++) {
+        float lo = a[2*c]   > b[2*c]   ? a[2*c]   : b[2*c];
+        float hi = a[2*c+1] < b[2*c+1] ? a[2*c+1] : b[2*c+1];
+        if (hi <= lo) return 0.0f;
+        ov *= hi - lo;
+        va *= a[2*c+1] - a[2*c];
+        vb *= b[2*c+1] - b[2*c];
+    }
+    float mn = va < vb ? va : vb;
+    return mn > 1e-9f ? ov / mn : 0.0f;
+}
+
+/* Collapse each LOD family to its highest-detail tier.
+ *
+ * Two meshes are the same part only if they share a name key AND their
+ * bounding boxes genuinely overlap. Both halves matter, and a fleet sweep
+ * proved why neither alone is safe:
+ *   - name alone is wrong: truncation makes L/R pairs collide (LANCEREVO8 and
+ *     IMPREZAWRX both have SIX meshes reading "..._KIT00_HEADLIGHT_"), and on
+ *     HUMMER/GOLF/MUSTANGGT/NAVIGATOR some same-named DOOR_PANEL / DOOR_SILL /
+ *     BRAKELIGHT nodes are distinct parts sitting apart. Deduping those by
+ *     name would delete real geometry. The overlap gate keeps them: the
+ *     anchor only absorbs meshes sharing its space, so the right-hand
+ *     headlight simply starts its own group.
+ *   - file order is wrong: keeping the first occurrence loses detail, because
+ *     the tiers are NOT always stored best-first. Seven parts across the fleet
+ *     (GOLF/PEUGOT/RSX roofs, CIVIC/RX8 brakelights, SUPRA/FOCUS skirts) store
+ *     a later tier with MORE vertices than the one named _A.
+ * Hence: group spatially, then keep max vertex count. */
+#define N2_LOD_OVERLAP 0.4f
+static void n2_car_dedupe_lod(N2Scene *s) {
+    int n = s->count;
+    if (n < 2) return;
+    float (*bb)[6] = (float (*)[6])malloc((size_t)n * sizeof *bb);
+    char *drop = (char *)calloc((size_t)n, 1);
+    if (!bb || !drop) { free(bb); free(drop); return; }   /* OOM: keep everything */
+    for (int i = 0; i < n; i++) n2_mesh_bbox(&s->meshes[i], bb[i]);
+    for (int i = 0; i < n; i++) {
+        if (drop[i] || !s->meshes[i].namekey) continue;
+        int best = i;                       /* i stays the spatial anchor */
+        for (int j = i + 1; j < n; j++) {
+            if (drop[j] || s->meshes[j].namekey != s->meshes[i].namekey) continue;
+            if (n2_bbox_overlap(bb[i], bb[j]) < N2_LOD_OVERLAP) continue;
+            if (s->meshes[j].nverts > s->meshes[best].nverts) { drop[best] = 1; best = j; }
+            else drop[j] = 1;
+        }
+    }
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+        if (drop[i]) { free(s->meshes[i].verts); free(s->meshes[i].idx); continue; }
+        if (w != i) s->meshes[w] = s->meshes[i];
+        w++;
+    }
+    s->count = w;
+    free(bb); free(drop);
 }
 
 /* Plastic trim within N2_CAR_BODY: bumpers and rocker skirts are moulded
@@ -483,10 +563,10 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
         long ds = o + 8;
         if (m == 0x80134010u) {
             if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
-            if (n2_car_is_lod_proxy(d, ds, ds + s)) { o = ds + s; continue; }  /* _A only */
             int cat = n2_car_category(d, ds, ds + s);
             int trim = cat == N2_CAR_BODY && n2_car_is_trim(d, ds, ds + s);
             int roof = cat == N2_CAR_BODY && !trim && n2_car_is_roof(d, ds, ds + s);
+            uint32_t nk2 = n2_car_name_key(d, ds, ds + s);   /* LOD family, resolved after the walk */
             uint32_t tk = n2_mesh_texkey(d, ds, ds + s, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
@@ -498,6 +578,7 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
                 if (scene->count > before) {
                     scene->meshes[before].trim = trim;
                     scene->meshes[before].roof = roof;
+                    scene->meshes[before].namekey = nk2;
                 }
             }
         } else if (m != 0 && (m >> 28) == 8) {
@@ -510,6 +591,7 @@ static int n2_load_car(const unsigned char *d, long len, N2Scene *scene,
                        const uint32_t *keys, int nkeys) {
     memset(scene, 0, sizeof(*scene));
     n2_walk_car(d, 0, len, scene, keys, nkeys);
+    n2_car_dedupe_lod(scene);   /* collapse each LOD family to its best tier */
     return scene->count;
 }
 
