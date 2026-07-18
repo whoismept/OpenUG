@@ -55,11 +55,22 @@ static const char *FS =
        model-space (no per-vertex transform), so a rotated object (the car)
        must counter-rotate the light or its lit side turns with it. */
     "  vec3 L=normalize(uLight); vec3 N=normalize(vN);\n"
+    "  vec3 V=normalize(uCamPos - vPos);\n"
     "  float d=uAmbient+uDiffuse*max(dot(N,L),0.0);\n"   /* directional; reveals body form */
     /* uDecal: paint under an alpha-masked decal atlas (badges/vinyls) —
        texture RGB shows only where its alpha says so, paint elsewhere */
     "  vec4 t = texture2D(uTex,vUV);\n"
     "  vec3 base = uUseTex>0.5 ? (uDecal>0.5 ? mix(uColor,t.rgb,t.a) : t.rgb) : uColor;\n"
+    /* cheap view-angle cavity darkening (cars only, uSpec>0 — the world
+       batches always set uSpec=0): panel gaps/creases have no texture data
+       to show them (verified: body meshes carry no diffuse map at all), so
+       this fakes the early-2000s baked-AO look by darkening paint where the
+       surface turns away from the camera, instead of claiming detail that
+       isn't in the asset. */
+    "  if(uSpec>0.001){\n"
+    "    float edge=pow(1.0-clamp(dot(N,V),0.0,1.0), 4.0);\n"
+    "    base *= mix(1.0, 0.6, edge);\n"
+    "  }\n"
     "  float sp = pow(max(dot(N,L),0.0), 20.0)*uSpec;\n"       /* glossy sheen (car paint) */
     "  float rim = pow(1.0-abs(N.z), 3.0)*uSpec*0.4;\n"        /* fresnel-ish edge sheen */
     "  vec3 lit = base*d*1.35 + sp + rim;\n"
@@ -68,7 +79,6 @@ static const char *FS =
        sampled with the model-space reflection vector, fresnel-weighted.
        uCamPos is the camera in the SAME space as vPos/vN. */
     "  if(uEnv>0.001){\n"
-    "    vec3 V = normalize(uCamPos - vPos);\n"
     "    vec3 R = reflect(-V, N);\n"
     "    float up = clamp(R.z*0.5+0.5, 0.0, 1.0);\n"
     "    vec3 env = mix(vec3(0.02,0.02,0.03), vec3(0.05,0.06,0.11), up)\n"
