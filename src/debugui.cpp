@@ -48,12 +48,33 @@ extern "C" void dbgui_frame(void) {
 
     if (ImGui::CollapsingHeader("Session", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool show_menu_hud = !g_dbg.hud_hide_menu;
-        ImGui::Checkbox("show 3D menu HUD", &show_menu_hud);
+        ImGui::Checkbox("show 3D HUD (menu + race)", &show_menu_hud);
         g_dbg.hud_hide_menu = !show_menu_hud;
         ImGui::SameLine();
-        ImGui::TextDisabled("(off = viewport is scene-only; this panel still shows selection)");
-        ImGui::Text("car:     %-20s (%d/%d)", g_dbg.car_name, g_dbg.sel_car+1, g_dbg.n_cars);
-        ImGui::Text("track:   %-20s (%d/%d)", g_dbg.track_name, g_dbg.sel_track+1, g_dbg.n_tracks);
+        ImGui::TextDisabled("(off = viewport is scene-only; this panel still shows selection/telemetry)");
+        if (g_dbg.race_cars > 0)
+            ImGui::Text("race: P%d/%d   lap %d/%d", g_dbg.race_pos, g_dbg.race_cars,
+                        g_dbg.race_lap, g_dbg.race_laps);
+        /* car/track combos: picking a different entry sets want_car/
+           want_track for main.c to notice and relaunch with (same clean
+           re-exec path as the arrow keys — see relaunch() in main.c) */
+        g_dbg.want_car = -1; g_dbg.want_track = -1;
+        if (g_dbg.car_list && g_dbg.n_cars > 0) {
+            static const char *items[64];
+            int n = g_dbg.n_cars < 64 ? g_dbg.n_cars : 64;
+            for (int i = 0; i < n; i++) items[i] = g_dbg.car_list[i];
+            int cur = g_dbg.sel_car;
+            if (ImGui::Combo("car", &cur, items, n) && cur != g_dbg.sel_car)
+                g_dbg.want_car = cur;
+        } else ImGui::Text("car:     %-20s (%d/%d)", g_dbg.car_name, g_dbg.sel_car+1, g_dbg.n_cars);
+        if (g_dbg.track_list && g_dbg.n_tracks > 0) {
+            static const char *items[64];
+            int n = g_dbg.n_tracks < 64 ? g_dbg.n_tracks : 64;
+            for (int i = 0; i < n; i++) items[i] = g_dbg.track_list[i];
+            int cur = g_dbg.sel_track;
+            if (ImGui::Combo("track", &cur, items, n) && cur != g_dbg.sel_track)
+                g_dbg.want_track = cur;
+        } else ImGui::Text("track:   %-20s (%d/%d)", g_dbg.track_name, g_dbg.sel_track+1, g_dbg.n_tracks);
         ImGui::Text("circuit: %d/%d", g_dbg.sel_circuit+1, g_dbg.n_circuits);
         ImGui::TextDisabled("Left/Right car, Up/Down track, [ / ] circuit, Enter race");
         ImGui::Checkbox("Show UV Checker", (bool *)&g_dbg.show_uv_checker);

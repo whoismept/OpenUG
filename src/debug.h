@@ -34,11 +34,25 @@ typedef struct {
     /* --- session info + menu HUD (moved off the 3D viewport in debug builds:
        consulted only under DEBUG_UI, so plain builds are unaffected either
        way) --- */
-    int  hud_hide_menu;              /* 1 = the retro pixel-font menu overlay
-                                         (car/track name, pips, prompt bar)
-                                         is suppressed; read it in ImGui instead */
+    int  hud_hide_menu;              /* 1 = ALL retro pixel-font viewport text
+                                         (menu car/track/pips/prompt AND the
+                                         in-race position/lap/speed HUD) is
+                                         suppressed; read it in ImGui instead.
+                                         Plain builds have no ImGui, so they
+                                         never consult this — always drawn. */
     char car_name[32], track_name[64];
     int  sel_car, n_cars, sel_track, n_tracks, sel_circuit, n_circuits;
+    int  race_pos, race_cars, race_lap, race_laps;   /* mirrors the in-race HUD */
+
+    /* Session combo boxes: main.c points these at its own fixed-size car/
+     * track name arrays (read-only from here) once at startup; they don't
+     * move afterward, so the raw pointer is safe for the process lifetime.
+     * The panel writes want_car/want_track (else leaves them -1) when the
+     * user picks a different entry; main.c polls them once per frame and
+     * performs the SAME relaunch() the arrow-key menu already uses. */
+    const char (*car_list)[64];
+    const char (*track_list)[64];
+    int  want_car, want_track;
 
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */

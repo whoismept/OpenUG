@@ -46,6 +46,23 @@ DbgState g_dbg = {
     .hud_hide_menu = 1,   /* only consulted under DEBUG_UI; see debug.h */
 };
 
+/* Switching car or track means a whole new asset load (world batches, car
+ * buffers/textures, physics obstacles, AI paths — ~30 pieces of long-lived
+ * state with no teardown path), so both the menu's arrow keys and the
+ * ImGui car/track combos below trigger the SAME clean re-exec rather than
+ * an in-process hot-swap: the OS reclaims everything, so there is nothing
+ * to leak or get left dangling, which an untested from-scratch teardown/
+ * reload path could easily do quietly. */
+static void relaunch(const char *selfexe, const char *dataroot,
+                     const char *car, const char *track) {
+    char *na[8]; int a = 0;
+    na[a++] = (char *)selfexe; na[a++] = (char *)dataroot;
+    na[a++] = "--car";   na[a++] = (char *)car;
+    na[a++] = "--track"; na[a++] = (char *)track; na[a] = NULL;
+    SDL_Quit(); execvp(selfexe, na);
+    _exit(1);   /* only reached if execvp itself failed */
+}
+
 int main(int argc, char **argv) {
     collide_walls_selftest();
     phys_selftest();
@@ -433,20 +450,14 @@ int main(int argc, char **argv) {
                 }
                 else if (race_state == 3) {   /* pre-race menu navigation */
                     /* car and track each mean a whole new load, so they re-launch
-                       the process; circuit is a cheap in-place reload. */
-                    char *na[8]; int a=0;
+                       the process (see relaunch()); circuit is a cheap in-place
+                       reload. */
                     if ((k==SDLK_LEFT || k==SDLK_RIGHT) && ncars > 1) {
                         selcar = (selcar + (k==SDLK_RIGHT?1:ncars-1)) % ncars;
-                        na[a++]=(char*)selfexe; na[a++]=(char*)dataroot;
-                        na[a++]="--car"; na[a++]=carlist[selcar];
-                        na[a++]="--track"; na[a++]=(char*)trackname; na[a]=NULL;
-                        SDL_Quit(); execvp(selfexe, na); return 1;
+                        relaunch(selfexe, dataroot, carlist[selcar], trackname);
                     } else if ((k==SDLK_UP || k==SDLK_DOWN) && ntrack > 1) {
                         seltrack = (seltrack + (k==SDLK_DOWN?1:ntrack-1)) % ntrack;
-                        na[a++]=(char*)selfexe; na[a++]=(char*)dataroot;
-                        na[a++]="--car"; na[a++]=(char*)carname;
-                        na[a++]="--track"; na[a++]=tracklist[seltrack]; na[a]=NULL;
-                        SDL_Quit(); execvp(selfexe, na); return 1;
+                        relaunch(selfexe, dataroot, carname, tracklist[seltrack]);
                     } else if ((k==SDLK_LEFTBRACKET || k==SDLK_RIGHTBRACKET) && ncirc > 1) {
                         selcirc = (selcirc + (k==SDLK_RIGHTBRACKET?1:ncirc-1)) % ncirc;
                         nai = load_circuit(dataroot, circlist[selcirc], &scene,
@@ -961,7 +972,23 @@ int main(int argc, char **argv) {
 
         /* HUD: race-position leaderboard — one colour bar per car, ordered by
            progress along the racing line (leader on top); player bar wider. */
+        /* race telemetry (position/lap/speed) always mirrored to g_dbg for
+           the ImGui panel; the viewport HUD drawing itself is additionally
+           gated so debug builds can hide it (same pattern as the menu HUD
+           above — plain builds have no ImGui, so they always draw it). */
         if (nai > 0 && race_state != 3) {
+            int myprog = p_lap*aipath.n + p_prev, ppos_mirror = 1;
+            for (int k = 0; k < nai; k++)
+                if (ais[k].lap*aipath.n + ais[k].prevrel > myprog) ppos_mirror++;
+            g_dbg.race_pos = ppos_mirror; g_dbg.race_cars = nai + 1;
+            g_dbg.race_lap = p_lap<LAP_TARGET?p_lap+1:LAP_TARGET; g_dbg.race_laps = LAP_TARGET;
+        } else g_dbg.race_cars = 0;   /* not racing: ImGui readout hides itself */
+#ifdef DEBUG_UI
+        int draw_race_hud = !g_dbg.hud_hide_menu;
+#else
+        int draw_race_hud = 1;
+#endif
+        if (nai > 0 && race_state != 3 && draw_race_hud) {
             glDisable(GL_DEPTH_TEST);
             glUniform1f(uUnlit, 1.0f); glUniform1f(uUseTex, 0.0f);
             /* rank by monotonic progress = lap*loop + progress-along-loop */
@@ -1143,8 +1170,20 @@ int main(int argc, char **argv) {
         g_dbg.sel_car=selcar; g_dbg.n_cars=ncars;
         g_dbg.sel_track=seltrack; g_dbg.n_tracks=ntrack;
         g_dbg.sel_circuit=selcirc; g_dbg.n_circuits=ncirc;
+        g_dbg.car_list = (const char (*)[64])carlist;
+        g_dbg.track_list = (const char (*)[64])tracklist;
         dbgui_frame();
         dbgui_render();
+        /* the Session panel's car/track combos ask for a switch the same
+           way the arrow keys do: a clean process relaunch (see relaunch()
+           above) — there's no in-place teardown/reload path for the ~30
+           pieces of long-lived world/car state, and building one blind
+           (no way to interactively test repeated swaps right now) risks
+           a leak or dangling handle that a single screenshot can't catch. */
+        if (g_dbg.want_car >= 0 && g_dbg.want_car < ncars)
+            relaunch(selfexe, dataroot, carlist[g_dbg.want_car], trackname);
+        if (g_dbg.want_track >= 0 && g_dbg.want_track < ntrack)
+            relaunch(selfexe, dataroot, carname, tracklist[g_dbg.want_track]);
 #endif
         if (shot && ++shotframe >= 40) {
             unsigned char *px = malloc((size_t)W*H*3), *fl = malloc((size_t)W*H*3);
