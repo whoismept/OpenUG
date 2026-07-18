@@ -213,9 +213,10 @@ int main(int argc, char **argv) {
     GpuMesh wheelmesh; int have_wheel = 0;       /* procedural tyre, built after GL init */
     for (int k=0;k<4;k++){ float I[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; memcpy(wheelT[k],I,sizeof(I)); }
     float carbb[6] = {0,0,0,0,0,0};              /* body AABB min/max, for wheel placement */
+    N2CarConfig carcfg = { 0, 0, 0, 0 };         /* active customization profile (K cycles kits) */
     float spawn[3] = { cx, cy, cz }, heading0 = 0.0f;
     if (cdata) {
-        ncar = n2_load_car(cdata, clen, &car, ckeys, nck);
+        ncar = n2_load_car(cdata, clen, &car, ckeys, nck, &carcfg);
         /* Wheels are modelled once at the origin (the SolidObject transform is
            identity for every part — verified), so a lone wheel mesh renders
            buried in the body. Place it at 4 arch positions derived from the body
@@ -467,6 +468,23 @@ int main(int argc, char **argv) {
                         fyaw = atan2f(carpos[1]-cam[1], carpos[0]-cam[0]);
                         fpitch = -0.2f;
                     }
+                }
+                else if (k == SDLK_k && cdata) {
+                    /* cycle body kit 0 -> 1 -> 2 -> 0 and re-stream the car in
+                       place. Unlike car/track (a whole new world + audio load,
+                       hence relaunch()), this only touches the car's own
+                       buffers, so it is cheap and safe to do live. */
+                    carcfg.body_kit = (carcfg.body_kit + 1) % 3;
+                    for (int i = 0; i < ncar; i++) {
+                        glDeleteBuffers(1, &cgm[i].vbo);
+                        glDeleteBuffers(1, &cgm[i].nbo);
+                        glDeleteBuffers(1, &cgm[i].ibo);
+                    }
+                    free(cgm); cgm = NULL;
+                    n2_free_scene(&car);
+                    ncar = n2_load_car(cdata, clen, &car, ckeys, nck, &carcfg);
+                    cgm = upload_scene(&car);
+                    printf("body kit -> KIT%02d (%d meshes)\n", carcfg.body_kit, ncar);
                 }
                 else if (race_state == 3) {   /* pre-race menu navigation */
                     /* car and track each mean a whole new load, so they re-launch

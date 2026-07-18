@@ -32,7 +32,36 @@ typedef struct {
     uint32_t namekey; /* car meshes: hash of the part name with any trailing
                           _A.._D LOD suffix stripped, so every tier of one part
                           shares a key. 0 = unnamed. Drives n2_car_dedupe_lod. */
+    int      vkind;   /* car meshes: 0 = no variant token, 1 = KITnn, 2 = STYLEnn */
+    int      vnum;    /* the nn of that token */
+    uint32_t famkey;  /* namekey with the variant token ALSO removed, so
+                          KIT00_FRONT_BUMPER and KIT05_FRONT_BUMPER — the stock
+                          part and its aftermarket replacement — collide. Drives
+                          the kit override in n2_car_apply_config. */
 } N2Mesh;
+
+/* Active customization profile.
+ *
+ * NOTE on how the data actually lays out, which is not the obvious model:
+ * KIT00 is the WHOLE car (28-29 part families on MIATA/GOLF: body, doors,
+ * roof, hood, lights, wheels, engine...). KIT01..KIT29 carry only 3-5
+ * families each — front bumper, rear bumper, skirt, sometimes trunk audio.
+ * So a body kit does not REPLACE the car, it OVERRIDES those few parts on
+ * top of KIT00. Dropping KIT00 when a kit is selected would delete the
+ * entire vehicle except its bumpers.
+ * Hoods work the same way but under a STYLEnn token (there is no STYLE00 —
+ * the stock hood is KIT00_HOOD), so hood_style 0 means "keep KIT00's".
+ *
+ * spoiler/wheel are accepted but inert: neither lives in a car's own
+ * GEOMETRY.BIN. They are separate part libraries (CARS/SPOILER, CARS/WHEELS,
+ * each its own GEOMETRY.BIN), so wiring them needs a second asset load, not
+ * a filter over this file. Left as fields so the call sites don't churn. */
+typedef struct {
+    int body_kit;       /* 0 = stock KIT00 bumpers/skirts, N = KITnn overrides */
+    int hood_style;     /* 0 = stock KIT00 hood,           N = STYLEnn overrides */
+    int spoiler_style;  /* inert, see note */
+    int wheel_style_id; /* inert, see note */
+} N2CarConfig;
 
 typedef struct {
     N2Mesh *meshes;
@@ -348,11 +377,40 @@ static int n2_car_category(const unsigned char *d, long beg, long end) {
     return N2_CAR_MISC;
 }
 
-/* A car GEOMETRY.BIN holds EVERY customization part (stock body + all the body
- * kits, styles and widebodies) overlaid. Rendering them all is a mess, so skip
- * the alternates and keep only the stock config: drop STYLE*, KITW* (widebody)
- * and KIT01..KIT99, keeping KIT00 and un-kitted shared parts. Returns 1 = skip. */
-static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
+/* Locate the KITnn / STYLEnn token inside an extracted name run.
+ * Returns 1 = KITnn, 2 = STYLEnn, 0 = neither, and reports the token span so
+ * the family key can cut it out. KITW (widebody) fails the digit test and is
+ * handled as an always-skip below, not here. */
+static int n2_name_variant(const unsigned char *n, long L, int *num,
+                           long *tok_at, long *tok_len) {
+    for (long q = 0; q + 4 < L; q++)
+        if (n[q]=='K'&&n[q+1]=='I'&&n[q+2]=='T'&&
+            n[q+3]>='0'&&n[q+3]<='9'&&n[q+4]>='0'&&n[q+4]<='9') {
+            *num = (n[q+3]-'0')*10 + (n[q+4]-'0');
+            *tok_at = q; *tok_len = 5; return 1;
+        }
+    for (long q = 0; q + 6 < L; q++)
+        if (memcmp(n+q,"STYLE",5)==0 && n[q+5]>='0'&&n[q+5]<='9' && n[q+6]>='0'&&n[q+6]<='9') {
+            *num = (n[q+5]-'0')*10 + (n[q+6]-'0');
+            *tok_at = q; *tok_len = 7; return 2;
+        }
+    return 0;
+}
+
+/* Classify a car mesh against the active profile.
+ * Returns 1 = skip outright. Otherwise reports the variant token and the
+ * family key (name minus that token minus any _A.._D LOD suffix) so
+ * n2_car_apply_config can let an aftermarket part shadow the stock one.
+ *
+ * A car GEOMETRY.BIN overlays every customization option at once, so the
+ * walk keeps only what the profile can use: the shared/un-tokened parts,
+ * KIT00 (the base car), the selected KITnn, and the selected STYLEnn. */
+static int n2_car_is_variant(const unsigned char *d, long beg, long end,
+                             const N2CarConfig *cfg,
+                             int *out_kind, int *out_num, uint32_t *out_fam) {
+    if (out_kind) *out_kind = 0;
+    if (out_num)  *out_num  = 0;
+    if (out_fam)  *out_fam  = 0;
     N2Leaf mat[4]; int nm = 0;
     n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
     for (int k = 0; k < nm; k++) {
@@ -363,15 +421,27 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
                 while (j < s && (p[j]=='_' || (p[j]>='A'&&p[j]<='Z') || (p[j]>='0'&&p[j]<='9'))) j++;
                 if (j - i >= 5) {
                     const unsigned char *n = p + i; long L = j - i;
-                    if (n2_contains(n,L,"STYLE") || n2_contains(n,L,"KITW") ||
+                    if (n2_contains(n,L,"KITW") ||
                         n2_contains(n,L,"WIDE")  ||   /* widebody variants (WIDE1..4) */
                         n2_contains(n,L,"DECAL"))     /* decal mount shells (used only
                                                          when a sticker is applied) */
                         return 1;
-                    for (long q = 0; q + 4 < L; q++)          /* KIT01..KIT99, not KIT00 */
-                        if (n[q]=='K'&&n[q+1]=='I'&&n[q+2]=='T'&&
-                            n[q+3]>='0'&&n[q+3]<='9'&&n[q+4]>='0'&&n[q+4]<='9'&&
-                            !(n[q+3]=='0'&&n[q+4]=='0')) return 1;
+                    int num = 0; long ta = 0, tl = 0;
+                    int kind = n2_name_variant(n, L, &num, &ta, &tl);
+                    if (kind == 1 && num != 0 && num != cfg->body_kit)   return 1;
+                    if (kind == 2 && num != cfg->hood_style)             return 1;
+                    if (out_kind) *out_kind = kind;
+                    if (out_num)  *out_num  = num;
+                    if (out_fam) {                    /* hash the name minus the token */
+                        long e = L;
+                        if (e >= 2 && n[e-2]=='_' && n[e-1]>='A' && n[e-1]<='D') e -= 2;
+                        uint32_t h = 2166136261u;
+                        for (long q = 0; q < e; q++) {
+                            if (kind && q >= ta && q < ta + tl) continue;
+                            h ^= n[q]; h *= 16777619u;
+                        }
+                        *out_fam = h ? h : 1u;
+                    }
                     return 0;
                 }
                 i = j;
@@ -379,6 +449,39 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
         }
     }
     return 0;
+}
+
+/* Let selected aftermarket parts shadow their stock counterparts.
+ * KIT00 supplies the whole car; a selected KITnn or STYLEnn supplies a few
+ * replacement families. Wherever both provide the same family, drop KIT00's.
+ * Runs before the LOD collapse, so the winner still picks its best tier. */
+static void n2_car_apply_config(N2Scene *s, const N2CarConfig *cfg) {
+    if (!cfg->body_kit && !cfg->hood_style) return;   /* pure stock: nothing shadows */
+    int n = s->count;
+    char *drop = (char *)calloc((size_t)(n ? n : 1), 1);
+    if (!drop) return;                                /* OOM: keep everything */
+    /* Mark first, compact after. Removing inline while scanning would move the
+       anchor mesh out from under the loop (swap-with-last can relocate i
+       itself), which silently skips shadowing and leaves both the stock and
+       the aftermarket part drawn on top of each other. */
+    for (int i = 0; i < n; i++) {
+        int sel = (s->meshes[i].vkind == 1 && s->meshes[i].vnum == cfg->body_kit
+                                           && cfg->body_kit != 0)
+               || (s->meshes[i].vkind == 2);
+        if (!sel || !s->meshes[i].famkey) continue;
+        for (int j = 0; j < n; j++)
+            if (j != i && s->meshes[j].vkind == 1 && s->meshes[j].vnum == 0 &&
+                s->meshes[j].famkey == s->meshes[i].famkey)
+                drop[j] = 1;
+    }
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+        if (drop[i]) { free(s->meshes[i].verts); free(s->meshes[i].idx); continue; }
+        if (w != i) s->meshes[w] = s->meshes[i];
+        w++;
+    }
+    s->count = w;
+    free(drop);
 }
 
 /* LOD family key: FNV-1a of the part name with any trailing _A.._D suffix
@@ -616,13 +719,14 @@ static int n2_mesh_submeshes(const unsigned char *d, long beg, long end,
  * per object, THAT would be the real signal this is worth revisiting.
  * removed vinyl/badge fallback, not a real submesh material). */
 static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *scene,
-                        const uint32_t *keys, int nkeys) {
+                        const uint32_t *keys, int nkeys, const N2CarConfig *cfg) {
     long o = beg;
     while (o + 8 <= end) {
         uint32_t m = n2_u32(d + o), s = n2_u32(d + o + 4);
         long ds = o + 8;
         if (m == 0x80134010u) {
-            if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
+            int vkind = 0, vnum = 0; uint32_t vfam = 0;
+            if (n2_car_is_variant(d, ds, ds + s, cfg, &vkind, &vnum, &vfam)) { o = ds + s; continue; }
             int cat = n2_car_category(d, ds, ds + s);
             int trim = cat == N2_CAR_BODY && n2_car_is_trim(d, ds, ds + s);
             int roof = cat == N2_CAR_BODY && !trim && n2_car_is_roof(d, ds, ds + s);
@@ -666,6 +770,9 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
                            another tier. */
                         scene->meshes[before].namekey =
                             k == big ? nk2 : nk2 ^ (0x9e3779b9u * (sub[k].mat + 1));
+                        scene->meshes[before].vkind = vkind;
+                        scene->meshes[before].vnum = vnum;
+                        scene->meshes[before].famkey = vfam;
                     }
                 }
             } else {
@@ -676,20 +783,26 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
                         scene->meshes[before].trim = trim;
                         scene->meshes[before].roof = roof;
                         scene->meshes[before].namekey = nk2;
+                        scene->meshes[before].vkind = vkind;
+                        scene->meshes[before].vnum = vnum;
+                        scene->meshes[before].famkey = vfam;
                     }
                 }
             }
         } else if (m != 0 && (m >> 28) == 8) {
-            n2_walk_car(d, ds, ds + s, scene, keys, nkeys);
+            n2_walk_car(d, ds, ds + s, scene, keys, nkeys, cfg);
         }
         o = ds + s;
     }
 }
 static int n2_load_car(const unsigned char *d, long len, N2Scene *scene,
-                       const uint32_t *keys, int nkeys) {
+                       const uint32_t *keys, int nkeys, const N2CarConfig *cfg) {
+    static const N2CarConfig stock = { 0, 0, 0, 0 };
+    if (!cfg) cfg = &stock;
     memset(scene, 0, sizeof(*scene));
-    n2_walk_car(d, 0, len, scene, keys, nkeys);
-    n2_car_dedupe_lod(scene);   /* collapse each LOD family to its best tier */
+    n2_walk_car(d, 0, len, scene, keys, nkeys, cfg);
+    n2_car_apply_config(scene, cfg);   /* aftermarket parts shadow stock ones */
+    n2_car_dedupe_lod(scene);          /* collapse each LOD family to its best tier */
     return scene->count;
 }
 
