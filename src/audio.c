@@ -182,7 +182,13 @@ static void xas_decode(const unsigned char *d, int16_t *out, uint32_t nsamp) {
             for (int hi = 1; hi >= 0 && n < nsamp; hi--) {
                 int nib = hi ? d[b] >> 4 : d[b] & 15;
                 if (nib > 7) nib -= 16;
-                float s = (float)((nib << 12) >> shift) + p1*XC1[ci] + p2*XC2[ci];
+                /* nib is signed (-8..7): left-shifting it is UB in C even
+                   though every real target just sign-extends. Multiplying
+                   by 2^12 first gives the identical bit pattern without the
+                   UB; the right shift that follows stays on an already-
+                   nonnegative-shifted value's implementation-defined (not
+                   undefined) arithmetic shift, same as before. */
+                float s = (float)((nib * 4096) >> shift) + p1*XC1[ci] + p2*XC2[ci];
                 if (s > 32767.0f) s = 32767.0f; if (s < -32768.0f) s = -32768.0f;
                 p2 = p1; p1 = s;
                 out[n++] = (int16_t)s;
