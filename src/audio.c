@@ -114,7 +114,10 @@ static void eaxa_decode(const unsigned char *d, int16_t *out, uint32_t nsamp) {
                 for (int hi = 1; hi >= 0 && n < nsamp; hi--) {
                     int nib = hi ? d[b] >> 4 : d[b] & 15;
                     if (nib > 7) nib -= 16;
-                    int s = ((nib << shift) + prev*EAXA_C1[ci] + prev2*EAXA_C2[ci] + 0x80) >> 8;
+                    /* same signed-nibble shift UB as xas_decode: multiply by
+                       2^shift instead. shift is 5..20 here, so 1<<shift and
+                       the product (|nib| <= 8) both stay well inside int. */
+                    int s = ((nib * (1 << shift)) + prev*EAXA_C1[ci] + prev2*EAXA_C2[ci] + 0x80) >> 8;
                     if (s > 32767) s = 32767; if (s < -32768) s = -32768;
                     prev2 = prev; prev = s;
                     out[n++] = (int16_t)s;
