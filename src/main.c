@@ -56,6 +56,44 @@ DbgState g_dbg = {
 /* Load one aftermarket rim style out of a wheel-brand archive and upload it.
  * The archive holds several size/width variants per style; the first mesh is
  * used. Frees any previously uploaded rim. Returns 1 on success. */
+/* Drop triangles that weld two submesh runs together.
+ *
+ * The wheel archives carry a 0x134B02 table per object, but every texkey in
+ * them resolves to 0, so the shared walker's split (which only fires when the
+ * records use DIFFERENT textures) never triggers and the whole index buffer is
+ * regrouped in 3s from offset 0. Where a run boundary does not land on a
+ * multiple of 3 the tail of one run bridges into the head of the next, making
+ * a triangle that spans the entire rim. Measured: exactly 2 of 487 on BBS
+ * style 1, first at triangle 365; the other 485 are clean (mean edge 0.065 vs
+ * 0.81 diameter).
+ *
+ * Sanitized here rather than in n2_add_pair on purpose: that path is shared by
+ * all 57 cars, and this archive is the only place the condition is known to
+ * arise. Purely local, and geometric rather than name-based, so it cannot
+ * misfire on a legitimately large triangle in a small mesh. */
+static void rim_drop_welded_tris(N2Scene *s) {
+    for (int i = 0; i < s->count; i++) {
+        N2Mesh *m = &s->meshes[i];
+        float bb[6]; n2_mesh_bbox(m, bb);
+        float dx = bb[1]-bb[0], dy = bb[3]-bb[2], dz = bb[5]-bb[4];
+        float diag = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (diag <= 0.0f) continue;
+        float lim = 0.25f * diag, lim2 = lim * lim;
+        int w = 0;
+        for (int t = 0; t + 2 < m->nidx; t += 3) {
+            int ok = 1;
+            for (int k = 0; k < 3 && ok; k++) {
+                const float *p = m->verts + m->idx[t+k]*5;
+                const float *q = m->verts + m->idx[t+(k+1)%3]*5;
+                float ex=p[0]-q[0], ey=p[1]-q[1], ez=p[2]-q[2];
+                if (ex*ex+ey*ey+ez*ez > lim2) ok = 0;
+            }
+            if (ok) { m->idx[w]=m->idx[t]; m->idx[w+1]=m->idx[t+1]; m->idx[w+2]=m->idx[t+2]; w += 3; }
+        }
+        m->nidx = w;
+    }
+}
+
 static int load_rim_style(const unsigned char *wldata, long wllen,
                           const uint32_t *wkeys, int nwkeys, int style,
                           N2Scene *lib, GpuMesh **gm, int *ngm) {
@@ -70,6 +108,7 @@ static int load_rim_style(const unsigned char *wldata, long wllen,
     N2CarConfig wcfg = { 0, style, 0, style };   /* STYLEnn selects the rim */
     int n = n2_load_car(wldata, wllen, lib, wkeys, nwkeys, &wcfg);
     if (n <= 0) return 0;
+    rim_drop_welded_tris(lib);
     *gm = upload_scene(lib); *ngm = n;
     return 1;
 }
@@ -1034,16 +1073,11 @@ int main(int argc, char **argv) {
                               PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur : texWheel);
                 for (int k=0;k<4;k++){ float MVPw[16]; mat_mul(MVPc, wheelT[k], MVPw);
                     glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw);
-                    /* NOTE: the aftermarket rim geometry is loaded and
-                       verified (see load_rim_style) but is NOT drawn yet --
-                       instancing wheelgm[0] renders large cones, the same
-                       "urchin" topology symptom that made these procedural in
-                       the first place. Vertex positions are right (bbox
-                       +/-0.292, correct per style) and the tri/vert ratio is
-                       sane, so the fault is in which submesh is the rim, not
-                       in the load. Kept on the procedural wheel until that is
-                       identified, rather than ship a visible regression. */
-                    draw_gpumesh(&wheelmesh); }
+                    /* real aftermarket rim, on the same steering/rolling
+                       matrices; falls back to the procedural wheel if the
+                       library is missing. */
+                    if (nwheelgm > 0) draw_gpumesh(&wheelgm[0]);
+                    else              draw_gpumesh(&wheelmesh); }
                 g_dbg.drawn += 4;
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPc);
             }
