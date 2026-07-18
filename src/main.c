@@ -396,6 +396,7 @@ int main(int argc, char **argv) {
        colour; badges/vinyls overlay as decals). The debug pane's paint
        override still allows any colour live. */
     float paint[3] = { 0.70f, 0.70f, 0.75f };
+    if (!strcmp(carname, "MIATA")) { paint[0]=0.55f; paint[1]=0.10f; paint[2]=0.09f; }  /* reference showroom red */
     float carpos[3] = { spawn[0], spawn[1], spawn[2] };
     if (shot && aipath.n > 0) {
         /* --shot skips the menu (and its Enter-key start-line snap), so the
@@ -841,15 +842,18 @@ int main(int argc, char **argv) {
                 float specv = (c==N2_CAR_BODY||c==N2_CAR_MISC)?g_dbg.body_spec
                             : is_light?0.45f : c==N2_CAR_MECH?0.05f : 0.0f;
                 if (cgm[i].trim) specv *= 0.4f;
+                if (cgm[i].roof) specv = 0.05f;   /* canvas soft-top: near-matte */
                 glUniform1f(uSpec, specv);
-                glUniform1f(uGloss, cgm[i].trim ? 6.0f : 20.0f);
+                glUniform1f(uGloss, cgm[i].trim || cgm[i].roof ? 6.0f : 20.0f);
                 /* no diffuse texture exists for any light part (verified
                    exhaustively against the data, see n2_car_category) — chrome
                    housing + coloured lens read entirely through reflection.
                    Mechanical compartment parts (engine/exhaust) are unpainted
                    metal/plastic when they have no texture of their own — no
-                   body-paint gloss or reflection either. */
-                glUniform1f(rp.uEnv, (c==N2_CAR_BODY||c==N2_CAR_MISC)?0.35f
+                   body-paint gloss or reflection either. Soft-top canvas
+                   doesn't reflect the environment like painted metal either. */
+                glUniform1f(rp.uEnv, cgm[i].roof ? 0.02f
+                                   : (c==N2_CAR_BODY||c==N2_CAR_MISC)?0.35f
                                    : is_light?0.55f : c==N2_CAR_MECH?0.0f : 0.15f);
                 glUniform1f(rp.uDecal, 0.0f);   /* body branch may re-enable */
                 GLuint tex = 0; int hasalpha = 0;
@@ -877,7 +881,12 @@ int main(int argc, char **argv) {
                        submesh-level materials would let genuinely-textured
                        sub-regions (if any exist) resolve correctly instead
                        of an all-or-nothing per-object key. Not implemented. */
-                    glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
+                    /* soft-top canvas ignores the player's paint choice —
+                       real convertible tops don't get body-coloured, and
+                       this mesh has no texture of its own to show fabric
+                       weave instead. */
+                    if (cgm[i].roof) glUniform3f(uColor, 0.035f, 0.032f, 0.03f);
+                    else             glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
                     if (tex && !hasalpha) {
                         glUniform1f(uUseTex, 1.0f);
                         glBindTexture(GL_TEXTURE_2D, tex);

@@ -25,6 +25,10 @@ typedef struct {
     int      trim;    /* car BODY meshes only: 1 = plastic bumper/skirt (verified
                           real per-part name tokens, e.g. GOLF_KIT00_FRONT_BUMPER_A),
                           duller/broader specular than the metallic paint panels */
+    int      roof;    /* car BODY meshes only: 1 = convertible soft-top fabric
+                          (verified real token, e.g. MIATA_KIT00_ROOF_A) — canvas,
+                          not painted metal: fixed dark colour, ignores player
+                          paint, near-zero specular/reflection */
 } N2Mesh;
 
 typedef struct {
@@ -381,6 +385,19 @@ static int n2_car_is_trim(const unsigned char *d, long beg, long end) {
     return 0;
 }
 
+/* Convertible soft-top fabric within N2_CAR_BODY: real token, e.g.
+ * MIATA_KIT00_ROOF_A/B/C. Canvas, not painted sheet metal — rendered as a
+ * fixed dark colour regardless of the player's paint choice. */
+static int n2_car_is_roof(const unsigned char *d, long beg, long end) {
+    N2Leaf mat[4]; int nm = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
+    for (int k = 0; k < nm; k++) {
+        const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        if (n2_contains(p, s, "ROOF")) return 1;
+    }
+    return 0;
+}
+
 /* Find this mesh's bound diffuse: scan its 0x134012 texture-slot list (8-byte
  * entries: key + 0) for a key present in the car's TPK (keys[]). 0 if none. */
 static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
@@ -438,6 +455,7 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
             if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
             int cat = n2_car_category(d, ds, ds + s);
             int trim = cat == N2_CAR_BODY && n2_car_is_trim(d, ds, ds + s);
+            int roof = cat == N2_CAR_BODY && !trim && n2_car_is_roof(d, ds, ds + s);
             uint32_t tk = n2_mesh_texkey(d, ds, ds + s, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
@@ -446,7 +464,10 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
             for (int k = 0; k < pairs; k++) {   /* car parts have identity transforms */
                 int before = scene->count;
                 n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk, NULL);
-                if (scene->count > before) scene->meshes[before].trim = trim;
+                if (scene->count > before) {
+                    scene->meshes[before].trim = trim;
+                    scene->meshes[before].roof = roof;
+                }
             }
         } else if (m != 0 && (m >> 28) == 8) {
             n2_walk_car(d, ds, ds + s, scene, keys, nkeys);

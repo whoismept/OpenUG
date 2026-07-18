@@ -24,7 +24,7 @@
 #include "nfsu2.h"
 
 /* per-mesh GPU buffers + computed normals */
-typedef struct { GLuint vbo, nbo, ibo; int nidx, cat, trim; uint32_t texkey; } GpuMesh;
+typedef struct { GLuint vbo, nbo, ibo; int nidx, cat, trim, roof; uint32_t texkey; } GpuMesh;
 
 /* ---- static-world batching: meshes merged per (256m grid cell, texture) ----
  * One interleaved VBO per batch kills the per-mesh bind/attrib overhead;

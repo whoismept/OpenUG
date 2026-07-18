@@ -238,7 +238,8 @@ GpuMesh *upload_scene(N2Scene *s) {
         glBufferData(GL_ARRAY_BUFFER, m->nverts*3*sizeof(float), nor, GL_STATIC_DRAW);
         glGenBuffers(1,&gm[i].ibo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,gm[i].ibo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, m->nidx*sizeof(uint16_t), m->idx, GL_STATIC_DRAW);
-        gm[i].nidx = m->nidx; gm[i].cat = m->cat; gm[i].texkey = m->texkey; gm[i].trim = m->trim;
+        gm[i].nidx = m->nidx; gm[i].cat = m->cat; gm[i].texkey = m->texkey;
+        gm[i].trim = m->trim; gm[i].roof = m->roof;
         free(nor);
     }
     return gm;
