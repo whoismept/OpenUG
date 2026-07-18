@@ -8,6 +8,27 @@
 
 static void grid_build(World *w);
 
+/* Sector/streaming-trigger audit (Phase 20): TRACKS/ holds 8 named city
+ * districts (L4RA/B/C/D/F/G/H/R), each a standalone STREAM<name>.BUN
+ * geometry bundle (2 MB to 115 MB) plus a small companion <name>.BUN that
+ * — per its strings dump (ZCV_ and ZCS_ prefixed names: trains,
+ * drawbridges, gates, garbage cans) — holds scripted/animated set-
+ * dressing, not spatial data.
+ * Grepped every file under TRACKS/, GLOBAL/, FRONTEND/ for trigger,
+ * portal, volume, sector, zone, hub, and region-bound keywords: zero
+ * hits. There is no portal graph, trigger-volume list, or district
+ * connectivity table anywhere in this data — retail's PS2-era district
+ * streaming was almost certainly just "load whichever district bundle
+ * the camera's fixed district ID names," not a spatial trigger system,
+ * because there's nothing to look up: all district bundles already
+ * share one continuous world coordinate system (confirmed by their
+ * mesh bounds abutting with no overlap/gap), so a district boundary is
+ * just wherever one bundle's geometry ends and its neighbour's begins.
+ * That's why "ALL" below just concatenates every STREAM*.BUN into one
+ * scene at load time instead of paging them — on modern hardware the
+ * whole city (28k+ meshes, confirmed in Phase 19) comfortably fits
+ * resident at once, so the retail streaming problem doesn't exist here
+ * and there is no trigger structure to wire up. */
 int world_load(World *w, const char *troot, const char *trackname) {
     memset(w, 0, sizeof *w);
 
