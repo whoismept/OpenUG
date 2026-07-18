@@ -24,7 +24,7 @@
 #include "nfsu2.h"
 
 /* per-mesh GPU buffers + computed normals */
-typedef struct { GLuint vbo, nbo, ibo; int nidx, cat; uint32_t texkey; } GpuMesh;
+typedef struct { GLuint vbo, nbo, ibo; int nidx, cat, trim; uint32_t texkey; } GpuMesh;
 
 /* ---- static-world batching: meshes merged per (256m grid cell, texture) ----
  * One interleaved VBO per batch kills the per-mesh bind/attrib overhead;
@@ -55,9 +55,11 @@ typedef struct {
           uFogColor, uFogDensity,   /* exp^2 distance fog (matches the sky) */
           uCamPos,  /* camera in the current object's model space */
           uEnv,     /* environment-reflection amount (cars only) */
-          uUVCheck; /* 1 = show the diagnostic UV-coordinate visualization
+          uUVCheck, /* 1 = show the diagnostic UV-coordinate visualization
                        instead of lighting/texture (toggle lives in the
                        ImGui Session panel, make debug only) */
+          uGloss;   /* specular pow() exponent: high = tight metallic-paint
+                       highlight, low = broad plastic/trim sheen (cars only) */
 } RProg;
 
 /* world-space sun direction (night scene key light) */

@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
     GLint uMVP = rp.uMVP, uUseTex = rp.uUseTex, uColor = rp.uColor,
           uUnlit = rp.uUnlit, uAlpha = rp.uAlpha, uSoft = rp.uSoft,
           uSpec = rp.uSpec, uAmbient = rp.uAmbient, uDiffuse = rp.uDiffuse,
-          uLight = rp.uLight;
+          uLight = rp.uLight, uGloss = rp.uGloss;
 
     /* Per-mesh track textures: each mesh's diffuse key (0x134012) resolves to a
        texture in the region's own STREAM TPK (grass/road/props) or the shared
@@ -834,8 +834,15 @@ int main(int argc, char **argv) {
                     (is_light       && !g_dbg.show_lights)|| (c==N2_CAR_TIRE && !g_dbg.show_tires) ||
                     ((c==N2_CAR_MISC||c==N2_CAR_MECH) && !g_dbg.show_misc)) continue;
                 if (c == N2_CAR_GLASS) continue;   /* translucent: blended pass below */
-                glUniform1f(uSpec, (c==N2_CAR_BODY||c==N2_CAR_MISC)?g_dbg.body_spec
-                                 : is_light?0.45f : c==N2_CAR_MECH?0.05f : 0.0f);
+                /* plastic trim (bumpers/skirts, real per-part name tokens —
+                   see n2_car_is_trim): duller and broader than the metallic
+                   paint around it, so it doesn't read as the same "sticker"
+                   material as the door/hood/fender panels. */
+                float specv = (c==N2_CAR_BODY||c==N2_CAR_MISC)?g_dbg.body_spec
+                            : is_light?0.45f : c==N2_CAR_MECH?0.05f : 0.0f;
+                if (cgm[i].trim) specv *= 0.4f;
+                glUniform1f(uSpec, specv);
+                glUniform1f(uGloss, cgm[i].trim ? 6.0f : 20.0f);
                 /* no diffuse texture exists for any light part (verified
                    exhaustively against the data, see n2_car_category) — chrome
                    housing + coloured lens read entirely through reflection.
@@ -899,7 +906,7 @@ int main(int argc, char **argv) {
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glDepthMask(GL_FALSE);
                 glUniform1f(rp.uDecal, 0.0f); glUniform1f(uUseTex, 0.0f);
-                glUniform1f(uSpec, 0.6f); glUniform1f(uAlpha, 0.55f);
+                glUniform1f(uSpec, 0.6f); glUniform1f(uGloss, 20.0f); glUniform1f(uAlpha, 0.55f);
                 glUniform1f(rp.uEnv, 0.8f);   /* glass reflects hardest */
                 glUniform3f(uColor, 0.10f, 0.13f, 0.17f);
                 for (int i = 0; i < ncar; i++)

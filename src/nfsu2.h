@@ -22,6 +22,9 @@ typedef struct {
     int      nidx;
     int      cat;     /* N2_ROAD / N2_TERRAIN / N2_OTHER, from material name */
     uint32_t texkey;  /* car meshes: bound TPK diffuse key (0x134012), 0 if none */
+    int      trim;    /* car BODY meshes only: 1 = plastic bumper/skirt (verified
+                          real per-part name tokens, e.g. GOLF_KIT00_FRONT_BUMPER_A),
+                          duller/broader specular than the metallic paint panels */
 } N2Mesh;
 
 typedef struct {
@@ -362,6 +365,22 @@ static int n2_car_is_variant(const unsigned char *d, long beg, long end) {
     return 0;
 }
 
+/* Plastic trim within N2_CAR_BODY: bumpers and rocker skirts are moulded
+ * polyurethane, not the metal body shell, and carry their own name tokens
+ * (verified real, fleet-wide: MIATA/GOLF/HUMMER/350Z/SKYLINE all have
+ * <CAR>_KIT00_FRONT_BUMPER_*, REAR_BUMPER_*, SKIRT_* — the stock KIT00 set
+ * that survives n2_car_is_variant). Used to dial back specular/gloss so
+ * they read as a duller material than the painted panels around them. */
+static int n2_car_is_trim(const unsigned char *d, long beg, long end) {
+    N2Leaf mat[4]; int nm = 0;
+    n2_find_leaves(d, beg, end, 0x00134011u, mat, &nm, 4);
+    for (int k = 0; k < nm; k++) {
+        const unsigned char *p = d + mat[k].off; long s = mat[k].size;
+        if (n2_contains(p, s, "BUMPER") || n2_contains(p, s, "SKIRT")) return 1;
+    }
+    return 0;
+}
+
 /* Find this mesh's bound diffuse: scan its 0x134012 texture-slot list (8-byte
  * entries: key + 0) for a key present in the car's TPK (keys[]). 0 if none. */
 static uint32_t n2_mesh_texkey(const unsigned char *d, long beg, long end,
@@ -418,13 +437,17 @@ static void n2_walk_car(const unsigned char *d, long beg, long end, N2Scene *sce
         if (m == 0x80134010u) {
             if (n2_car_is_variant(d, ds, ds + s)) { o = ds + s; continue; }  /* stock only */
             int cat = n2_car_category(d, ds, ds + s);
+            int trim = cat == N2_CAR_BODY && n2_car_is_trim(d, ds, ds + s);
             uint32_t tk = n2_mesh_texkey(d, ds, ds + s, keys, nkeys);
             N2Leaf vtx[64], idx[64]; int nv = 0, ni = 0;
             n2_find_leaves(d, ds, ds + s, 0x00134B01u, vtx, &nv, 64);
             n2_find_leaves(d, ds, ds + s, 0x00134B03u, idx, &ni, 64);
             int pairs = nv < ni ? nv : ni;
-            for (int k = 0; k < pairs; k++)   /* car parts have identity transforms */
+            for (int k = 0; k < pairs; k++) {   /* car parts have identity transforms */
+                int before = scene->count;
                 n2_add_pair(d, vtx[k], idx[k], cat, scene, 36, 28, 0, tk, NULL);
+                if (scene->count > before) scene->meshes[before].trim = trim;
+            }
         } else if (m != 0 && (m >> 28) == 8) {
             n2_walk_car(d, ds, ds + s, scene, keys, nkeys);
         }

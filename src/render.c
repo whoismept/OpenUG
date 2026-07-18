@@ -33,6 +33,7 @@ static const char *FS =
     "uniform float uAmbient; uniform float uDiffuse; uniform vec3 uLight;\n"
     "uniform vec3 uFogColor; uniform float uFogDensity;\n"
     "uniform vec3 uCamPos; uniform float uEnv; uniform float uUVCheck;\n"
+    "uniform float uGloss;\n"
     /* exp^2 distance fog: fades far batches into the sky colour (which is
        cleared to uFogColor, so the horizon and the haze always agree) */
     "void main(){\n"
@@ -79,7 +80,7 @@ static const char *FS =
     "    float edge=pow(1.0-clamp(dot(N,V),0.0,1.0), 4.0);\n"
     "    base *= mix(1.0, 0.6, edge);\n"
     "  }\n"
-    "  float sp = pow(max(dot(N,L),0.0), 20.0)*uSpec;\n"       /* glossy sheen (car paint) */
+    "  float sp = pow(max(dot(N,L),0.0), uGloss)*uSpec;\n"     /* glossy sheen (car paint) */
     "  float rim = pow(1.0-abs(N.z), 3.0)*uSpec*0.4;\n"        /* fresnel-ish edge sheen */
     "  vec3 lit = base*d*1.35 + sp + rim;\n"
     /* environment reflection (cars only, uEnv>0): a procedural night-city
@@ -196,11 +197,13 @@ RProg render_program(void) {
     r.uAmbient = glGetUniformLocation(r.prog, "uAmbient");
     r.uDiffuse = glGetUniformLocation(r.prog, "uDiffuse");
     r.uLight   = glGetUniformLocation(r.prog, "uLight");
+    r.uGloss   = glGetUniformLocation(r.prog, "uGloss");
     glUniform1f(r.uAlpha, 1.0f); glUniform1f(r.uSoft, 0.0f); glUniform1f(r.uSpec, 0.0f);
     glUniform1f(r.uDecal, 0.0f);
     glUniform3f(r.uFogColor, 0.06f, 0.07f, 0.11f); glUniform1f(r.uFogDensity, 0.0f);
     glUniform3f(r.uCamPos, 0, 0, 0); glUniform1f(r.uEnv, 0.0f);
     glUniform1f(r.uUVCheck, 0.0f);
+    glUniform1f(r.uGloss, 20.0f);
     glUniform3f(r.uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);
     return r;
 }
@@ -235,7 +238,7 @@ GpuMesh *upload_scene(N2Scene *s) {
         glBufferData(GL_ARRAY_BUFFER, m->nverts*3*sizeof(float), nor, GL_STATIC_DRAW);
         glGenBuffers(1,&gm[i].ibo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,gm[i].ibo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, m->nidx*sizeof(uint16_t), m->idx, GL_STATIC_DRAW);
-        gm[i].nidx = m->nidx; gm[i].cat = m->cat; gm[i].texkey = m->texkey;
+        gm[i].nidx = m->nidx; gm[i].cat = m->cat; gm[i].texkey = m->texkey; gm[i].trim = m->trim;
         free(nor);
     }
     return gm;
