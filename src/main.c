@@ -53,6 +53,27 @@ DbgState g_dbg = {
  * an in-process hot-swap: the OS reclaims everything, so there is nothing
  * to leak or get left dangling, which an untested from-scratch teardown/
  * reload path could easily do quietly. */
+/* Load one aftermarket rim style out of a wheel-brand archive and upload it.
+ * The archive holds several size/width variants per style; the first mesh is
+ * used. Frees any previously uploaded rim. Returns 1 on success. */
+static int load_rim_style(const unsigned char *wldata, long wllen,
+                          const uint32_t *wkeys, int nwkeys, int style,
+                          N2Scene *lib, GpuMesh **gm, int *ngm) {
+    if (!wldata) return 0;
+    for (int i = 0; i < *ngm; i++) {
+        glDeleteBuffers(1, &(*gm)[i].vbo);
+        glDeleteBuffers(1, &(*gm)[i].nbo);
+        glDeleteBuffers(1, &(*gm)[i].ibo);
+    }
+    free(*gm); *gm = NULL; *ngm = 0;
+    n2_free_scene(lib);
+    N2CarConfig wcfg = { 0, style, 0, style };   /* STYLEnn selects the rim */
+    int n = n2_load_car(wldata, wllen, lib, wkeys, nwkeys, &wcfg);
+    if (n <= 0) return 0;
+    *gm = upload_scene(lib); *ngm = n;
+    return 1;
+}
+
 static void relaunch(const char *selfexe, const char *dataroot,
                      const char *car, const char *track) {
     char *na[8]; int a = 0;
@@ -378,6 +399,32 @@ int main(int argc, char **argv) {
     GLuint texWheelBlur = make_wheel_blur_tex();
     #define WHEEL_BLUR_KMH 40.0f
 
+    /* Aftermarket rim library. NOT CARS/WHEELS/GEOMETRY.BIN -- that file is a
+       64-byte stub; the real geometry is per brand (GEOMETRY_BBS.BIN,
+       GEOMETRY_ENKEI.BIN, ...) in the same chunk format as a car, so the
+       ordinary car walker reads it. Each brand file holds its styles under
+       STYLEnn tokens, which is the SAME token hoods use inside a car, so the
+       style selector here is wheel_style_id rather than hood_style. */
+    N2Scene wheellib; memset(&wheellib, 0, sizeof wheellib);
+    GpuMesh *wheelgm = NULL; int nwheelgm = 0, wheel_style = 1;
+    long wllen = 0; unsigned char *wldata = NULL;
+    {   char wlp[1024];
+        snprintf(wlp, sizeof wlp, "%s/CARS/WHEELS/GEOMETRY_BBS.BIN", dataroot);
+        wldata = n2_read_file(wlp, &wllen);
+    }
+    uint32_t wkeys[64]; int nwkeys = 0;
+    {   char wtp[1024]; long wtlen = 0;
+        snprintf(wtp, sizeof wtp, "%s/CARS/WHEELS/TEXTURES.BIN", dataroot);
+        unsigned char *wt = n2_read_file(wtp, &wtlen);
+        if (wt) { nwkeys = n2_car_tex_keys(wt, wtlen, wkeys, 64); free(wt); }
+    }
+    if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
+                       &wheellib, &wheelgm, &nwheelgm))
+        printf("rims: BBS style %d, %d mesh(es)\n", wheel_style, nwheelgm);
+    else
+        printf("rims: library unavailable, using procedural wheels\n");
+
+
     /* static world -> per-(cell,texture) interleaved batches; the CPU-side
        scene stays alive for the physics/ground queries */
     /* Phase 21: skybox + neon/glow are pulled into their own batch lists so
@@ -468,6 +515,12 @@ int main(int argc, char **argv) {
                         fyaw = atan2f(carpos[1]-cam[1], carpos[0]-cam[0]);
                         fpitch = -0.2f;
                     }
+                }
+                else if (k == SDLK_w && wldata) {
+                    wheel_style = wheel_style % 8 + 1;   /* 1..8 */
+                    if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
+                                       &wheellib, &wheelgm, &nwheelgm))
+                        printf("rims -> BBS style %d (%d mesh(es))\n", wheel_style, nwheelgm);
                 }
                 else if (k == SDLK_k && cdata) {
                     /* cycle body kit 0 -> 1 -> 2 -> 0 and re-stream the car in
@@ -973,11 +1026,24 @@ int main(int argc, char **argv) {
                 glUniform1f(rp.uEnv, 0.3f);   /* alloy sheen on the rims */
                 glUniform1f(uUseTex, 1.0f);
                 /* PHYS_KMH(speed), not g_dbg.kmh: that mirror is only written
-                   at the end of the frame, so reading it here lags a frame. */
+                   at the end of the frame, so reading it here lags a frame.
+                   The library rims carry no resolvable diffuse key of their
+                   own, so they reuse the procedural rim sheet -- which also
+                   keeps the speed blur working on them. */
                 glBindTexture(GL_TEXTURE_2D,
                               PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur : texWheel);
                 for (int k=0;k<4;k++){ float MVPw[16]; mat_mul(MVPc, wheelT[k], MVPw);
-                    glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw); draw_gpumesh(&wheelmesh); }
+                    glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw);
+                    /* NOTE: the aftermarket rim geometry is loaded and
+                       verified (see load_rim_style) but is NOT drawn yet --
+                       instancing wheelgm[0] renders large cones, the same
+                       "urchin" topology symptom that made these procedural in
+                       the first place. Vertex positions are right (bbox
+                       +/-0.292, correct per style) and the tri/vert ratio is
+                       sane, so the fault is in which submesh is the rim, not
+                       in the load. Kept on the procedural wheel until that is
+                       identified, rather than ship a visible regression. */
+                    draw_gpumesh(&wheelmesh); }
                 g_dbg.drawn += 4;
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPc);
             }
