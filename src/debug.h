@@ -71,6 +71,7 @@ typedef struct {
     int  insp_dump;         /* panel raises, main.c dumps telemetry and clears */
     int  insp_flipn;        /* 1 = negate normals on the selected mesh (uFlipN) */
     int  insp_cull;         /* 0 = no culling (engine default), 1 = cull back, 2 = cull front */
+    int  insp_glass_depth;  /* 1 = glass pass writes depth (diagnostic) */
 
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */

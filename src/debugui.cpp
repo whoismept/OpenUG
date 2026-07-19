@@ -152,6 +152,8 @@ extern "C" void dbgui_frame(void) {
         const char *cullm[] = { "no culling (engine default)", "cull BACK faces", "cull FRONT faces" };
         ImGui::Combo("[Debug] Face culling", &g_dbg.insp_cull, cullm, 3);
         ImGui::TextDisabled("glFrontFace alone is inert here: the engine never enables\nGL_CULL_FACE, so winding has no effect until culling is on.\nThis selector turns it on for the selected mesh instead.");
+        ImGui::Checkbox("[Debug] Force Alpha Depth Write", (bool *)&g_dbg.insp_glass_depth);
+        ImGui::TextDisabled("glass pass uses glDepthMask(TRUE) instead of FALSE");
         if (ImGui::Button("clear selection")) g_dbg.insp_sel = -1;
     }
     ImGui::End();

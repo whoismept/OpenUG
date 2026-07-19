@@ -1084,13 +1084,37 @@ int main(int argc, char **argv) {
                uAlpha output. State restored before anything else draws. */
             if (g_dbg.show_glass) {
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+#ifdef DEBUG_UI
+                glDepthMask(g_dbg.insp_glass_depth ? GL_TRUE : GL_FALSE);
+#else
                 glDepthMask(GL_FALSE);
+#endif
                 glUniform1f(rp.uDecal, 0.0f); glUniform1f(uUseTex, 0.0f);
                 glUniform1f(uSpec, 0.6f); glUniform1f(uGloss, 20.0f); glUniform1f(uAlpha, 0.55f);
                 glUniform1f(rp.uEnv, 0.8f);   /* glass reflects hardest */
                 glUniform3f(uColor, 0.10f, 0.13f, 0.17f);
                 for (int i = 0; i < ncar; i++)
-                    if (cgm[i].cat == N2_CAR_GLASS) { draw_gpumesh(&cgm[i]); g_dbg.drawn++; }
+                    if (cgm[i].cat == N2_CAR_GLASS) {
+#ifdef DEBUG_UI
+                        /* the opaque loop skips glass, so the inspector overlay
+                           has to be applied here too or selecting a window did
+                           nothing at all. */
+                        int gi = (g_dbg.insp_sel == i);
+                        if (gi && g_dbg.insp_highlight) {
+                            glUniform1f(uUnlit, 1.0f); glUniform1f(uAlpha, 1.0f);
+                            glUniform3f(uColor, 1.0f, 0.08f, 0.85f);
+                        }
+                        if (gi && g_dbg.insp_wire) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+#endif
+                        draw_gpumesh(&cgm[i]); g_dbg.drawn++;
+#ifdef DEBUG_UI
+                        if (gi && g_dbg.insp_wire) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                        if (gi && g_dbg.insp_highlight) {
+                            glUniform1f(uUnlit, 0.0f); glUniform1f(uAlpha, 0.55f);
+                            glUniform3f(uColor, 0.10f, 0.13f, 0.17f);
+                        }
+#endif
+                    }
                 glUniform1f(uAlpha, 1.0f);
                 glDepthMask(GL_TRUE); glDisable(GL_BLEND);
             }
