@@ -38,6 +38,7 @@ DbgState g_dbg = {
     .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.85f,
     .wheel_z = -0.05f, .wheel_scale = 0.9f,
     .insp_sel = -1,
+    .neon_on = 1, .neon_col = { 0.15f, 0.45f, 1.0f }, .neon_str = 0.85f,
     .ambient = 0.38f, .diffuse = 0.62f, .body_spec = 0.34f,   /* glossy paint */
     /* f(700m cull range) ~= 0.07 — far batches dissolve into the sky */
     .fog_density = 0.0023f, .fog_r = 0.06f, .fog_g = 0.07f, .fog_b = 0.11f,
@@ -866,6 +867,31 @@ int main(int argc, char **argv) {
             }
             glUniform1f(uAlpha,1.0f); glUniform1f(uSoft,0.0f);
             glDepthMask(GL_TRUE); glDisable(GL_BLEND);
+
+            /* neon underglow: an additive coloured pool on the asphalt under
+               the chassis. Additive (not alpha) so it reads as emitted light
+               on dark tarmac rather than paint, uSoft so it falls off round
+               the edges, and sized from the same body AABB the shadow uses so
+               it tracks the car's real footprint. Drawn after the shadow so it
+               lights the ground the shadow just darkened. */
+            if (g_dbg.neon_on && g_dbg.neon_str > 0.001f) {
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                glDepthMask(GL_FALSE);
+                glUniform1f(uUnlit,1.0f); glUniform1f(uUseTex,0.0f); glUniform1f(uSoft,1.0f);
+                glUniform3f(uColor, g_dbg.neon_col[0], g_dbg.neon_col[1], g_dbg.neon_col[2]);
+                float nl = carbb[3]-carbb[0], nw = carbb[4]-carbb[1];
+                float nx = nl > 0.5f ? nl*1.45f : 4.2f, ny = nw > 0.5f ? nw*1.9f : 4.2f;
+                float nz = world_ground_z(&scene, carpos[0], carpos[1], carpos[2]) + 0.02f;
+                float M[16]={nx,0,0,0, 0,ny,0,0, 0,0,1,0,
+                             carpos[0]-nx*0.5f, carpos[1]-ny*0.5f, nz, 1};
+                float MV[16]; mat_mul(MVP,M,MV);
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,MV);
+                glUniform1f(uAlpha, g_dbg.neon_str);
+                draw_gpumesh(&quad); g_dbg.drawn++;
+                glUniform1f(uAlpha,1.0f); glUniform1f(uSoft,0.0f);
+                glUniformMatrix4fv(uMVP,1,GL_FALSE,MVP);
+                glDepthMask(GL_TRUE); glDisable(GL_BLEND);
+            }
         }
 
         /* headlights: warm soft light-pools cast on the road ahead (it's night),

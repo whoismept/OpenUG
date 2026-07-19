@@ -128,6 +128,12 @@ extern "C" void dbgui_frame(void) {
         ImGui::TextDisabled("re-streams GEOMETRY_<BRAND>.BIN and rebuilds the rim VBO/IBO");
     } else ImGui::TextDisabled("wheel library not loaded");
     ImGui::Separator();
+    if (ImGui::CollapsingHeader("Neon Underglow", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("neon on", (bool *)&g_dbg.neon_on);
+        ImGui::ColorEdit3("neon colour", g_dbg.neon_col);
+        ImGui::SliderFloat("intensity", &g_dbg.neon_str, 0.0f, 1.5f);
+    }
+    ImGui::Separator();
     ImGui::TextDisabled("body kit: K cycles KIT00/01/02 (see console)");
 
     if (ImGui::CollapsingHeader("Mesh Inspector", ImGuiTreeNodeFlags_DefaultOpen)) {

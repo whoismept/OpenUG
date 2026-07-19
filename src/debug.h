@@ -73,6 +73,11 @@ typedef struct {
     int  insp_cull;         /* 0 = no culling (engine default), 1 = cull back, 2 = cull front */
     int  insp_glass_depth;  /* 1 = glass pass writes depth (diagnostic) */
 
+    /* --- neon underglow (a real customization, not a diagnostic) --- */
+    int   neon_on;          /* 1 = project the underglow pool */
+    float neon_col[3];      /* emission colour */
+    float neon_str;         /* intensity */
+
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */
 } DbgState;
