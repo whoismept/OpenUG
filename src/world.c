@@ -2,11 +2,114 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "world.h"
 #include "resource.h"
 
 static void grid_build(World *w);
+
+/* ---- load-time duplicate stripper (Phase 48) ----
+   The 8 STREAM*.BUN bundles are overlapping per-race supersets, not adjacent
+   tiles, so stitching them (and even a single bundle on its own) stacks exact
+   copies of the same surface at dz=0.000 — the source of the --track ALL
+   z-fighting and a big chunk of wasted geometry (audit: 14551 of 28270 solid
+   meshes, tools/zfight_audit.c). This drops every mesh whose
+   (texkey, xyz-bbox, tri, vert) key was already registered, keeping the first
+   occurrence. Runs on the whole scene BEFORE mbb/grid/batches are built, so
+   the ground grid, the physics ground query, and the GPU batches all see one
+   clean surface layer with no further plumbing.
+
+   Identity is exact: two meshes that survive share a texkey, an identical
+   bounding box (all three axes) and the same tri+vert counts. An instanced
+   prop reused at a DIFFERENT position has a different bbox, so it is NOT a
+   duplicate and is kept — only same-place, same-asset copies are removed. */
+static const N2Scene *dd_s;      /* comparator context; load is single-threaded */
+static const float (*dd_bb)[6];
+static int dd_cmp(const void *pa, const void *pb) {
+    int a = *(const int *)pa, b = *(const int *)pb;
+    const N2Mesh *ma = &dd_s->meshes[a], *mb = &dd_s->meshes[b];
+    if (ma->texkey != mb->texkey) return ma->texkey < mb->texkey ? -1 : 1;
+    for (int k = 0; k < 6; k++)
+        if (dd_bb[a][k] != dd_bb[b][k]) return dd_bb[a][k] < dd_bb[b][k] ? -1 : 1;
+    if (ma->nidx   != mb->nidx)   return ma->nidx   < mb->nidx   ? -1 : 1;
+    if (ma->nverts != mb->nverts) return ma->nverts < mb->nverts ? -1 : 1;
+    return a - b;   /* stable: the earliest original index sorts first, so it
+                       is the copy we keep */
+}
+static int dd_same(int a, int b) {
+    const N2Mesh *ma = &dd_s->meshes[a], *mb = &dd_s->meshes[b];
+    if (ma->texkey != mb->texkey || ma->nidx != mb->nidx || ma->nverts != mb->nverts)
+        return 0;
+    for (int k = 0; k < 6; k++) if (dd_bb[a][k] != dd_bb[b][k]) return 0;
+    return 1;
+}
+
+/* Compact w->scene to unique meshes, fix each region's [mesh0,mesh1) range to
+   the compacted positions, free the dropped geometry. Returns meshes removed. */
+static int world_dedup(World *w) {
+    N2Scene *s = &w->scene;
+    int nm = s->count;
+    if (nm < 2) return 0;
+
+    float (*bb)[6] = (float (*)[6])malloc((size_t)nm * sizeof *bb);
+    int   *ord     = (int *)malloc((size_t)nm * sizeof *ord);
+    char  *drop    = (char *)calloc((size_t)nm, 1);
+    for (int i = 0; i < nm; i++) { n2_mesh_bbox(&s->meshes[i], bb[i]); ord[i] = i; }
+
+    dd_s = s; dd_bb = (const float (*)[6])bb;
+    qsort(ord, (size_t)nm, sizeof *ord, dd_cmp);
+
+    long droptri = 0;
+    for (int i = 0; i < nm; ) {
+        int j = i + 1; while (j < nm && dd_same(ord[i], ord[j])) j++;
+        for (int k = i + 1; k < j; k++) { drop[ord[k]] = 1; droptri += s->meshes[ord[k]].nidx / 3; }
+        i = j;
+    }
+
+    /* new index = count of survivors before this original slot */
+    int *keptbefore = (int *)malloc((size_t)(nm + 1) * sizeof *keptbefore);
+    keptbefore[0] = 0;
+    for (int i = 0; i < nm; i++) keptbefore[i + 1] = keptbefore[i] + (drop[i] ? 0 : 1);
+    for (int r = 0; r < w->nreg; r++) {
+        w->rgn[r].mesh0 = keptbefore[w->rgn[r].mesh0];
+        w->rgn[r].mesh1 = keptbefore[w->rgn[r].mesh1];
+    }
+
+    int wr = 0;
+    for (int i = 0; i < nm; i++) {
+        if (drop[i]) { free(s->meshes[i].verts); free(s->meshes[i].idx); continue; }
+        if (wr != i) s->meshes[wr] = s->meshes[i];
+        wr++;
+    }
+    s->count = wr;
+
+    /* region ranges must stay well-formed and cover exactly the survivors */
+    assert(wr == keptbefore[nm]);
+    for (int r = 0; r < w->nreg; r++)
+        assert(w->rgn[r].mesh0 <= w->rgn[r].mesh1 && w->rgn[r].mesh1 <= wr);
+
+    /* z-fight proof: rebuild the key over survivors and confirm none collide.
+       Cheap (load-time, one pass) and it is the actual deliverable — if this
+       ever fires, duplicates slipped through and --track ALL will z-fight. */
+    int residual = 0;
+    {
+        float (*bb2)[6] = (float (*)[6])malloc((size_t)wr * sizeof *bb2);
+        int   *ord2     = (int *)malloc((size_t)wr * sizeof *ord2);
+        for (int i = 0; i < wr; i++) { n2_mesh_bbox(&s->meshes[i], bb2[i]); ord2[i] = i; }
+        dd_s = s; dd_bb = (const float (*)[6])bb2;
+        qsort(ord2, (size_t)wr, sizeof *ord2, dd_cmp);
+        for (int i = 1; i < wr; i++) if (dd_same(ord2[i-1], ord2[i])) residual++;
+        free(bb2); free(ord2);
+    }
+    assert(residual == 0);
+
+    free(bb); free(ord); free(drop); free(keptbefore);
+    printf("dedup: %d -> %d meshes (dropped %d duplicates, %ld triangles); "
+           "residual coplanar duplicates: %d\n",
+           nm, wr, nm - wr, droptri, residual);
+    return nm - wr;
+}
 
 /* Sector/streaming-trigger audit (Phase 20): TRACKS/ holds 8 named city
  * districts (L4RA/B/C/D/F/G/H/R), each a standalone STREAM<name>.BUN
@@ -19,16 +122,34 @@ static void grid_build(World *w);
  * hits. There is no portal graph, trigger-volume list, or district
  * connectivity table anywhere in this data — retail's PS2-era district
  * streaming was almost certainly just "load whichever district bundle
- * the camera's fixed district ID names," not a spatial trigger system,
- * because there's nothing to look up: all district bundles already
- * share one continuous world coordinate system (confirmed by their
- * mesh bounds abutting with no overlap/gap), so a district boundary is
- * just wherever one bundle's geometry ends and its neighbour's begins.
- * That's why "ALL" below just concatenates every STREAM*.BUN into one
- * scene at load time instead of paging them — on modern hardware the
- * whole city (28k+ meshes, confirmed in Phase 19) comfortably fits
- * resident at once, so the retail streaming problem doesn't exist here
- * and there is no trigger structure to wire up. */
+ * the camera's fixed district ID names," not a spatial trigger system.
+ *
+ * CORRECTION (Phase 47, measured). This comment used to claim the
+ * bundles' "mesh bounds abut with no overlap/gap", so a district
+ * boundary was just where one bundle ends and the next begins. That is
+ * FALSE. Measuring solid-geometry bounds per bundle — excluding
+ * SKY/GLOW, whose skydome spans the whole map and masks the effect:
+ *   L4RA and L4RD have IDENTICAL solid bounds; so do L4RB and L4RG.
+ * The bundles are OVERLAPPING SUPERSETS, not adjacent tiles: each is a
+ * per-race-route working set that re-ships whatever geometry its route
+ * touches. Across all 8, 51.5% of solid meshes (14551 of 28270, 1.25M
+ * triangles) are exact duplicates — identical texkey, bbox, and
+ * tri/vert count. Adding tri+vert to the identity key moved the total
+ * by only 4 groups, so these are true duplicates, not LOD tiers.
+ *
+ * So "ALL" below concatenating every STREAM*.BUN is itself the cause of
+ * that mode's z-fighting: it stacks coplanar copies of one surface
+ * (measured dz = 0.000 between same-texkey pairs). The fix is a
+ * load-time dedupe on (texkey, bbox, tri, vert) — NOT a depth bias and
+ * NOT a vista/ground poly filter, because the conflicting layers are
+ * the same asset twice, not low-poly vista clashing with high-poly
+ * ground.
+ *
+ * Phase 48: that dedupe is now world_dedup(), run below right after the
+ * region loop and before mbb/grid/batch build, so the ground grid, the
+ * physics ground query, and the GPU batches all see one clean surface
+ * layer. It keeps the first copy of each (texkey, xyz-bbox, tri, vert)
+ * and drops the rest. */
 int world_load(World *w, const char *troot, const char *trackname) {
     memset(w, 0, sizeof *w);
 
@@ -78,6 +199,9 @@ int world_load(World *w, const char *troot, const char *trackname) {
         printf("region %-12s: %3ld MB, %5d meshes, %d tex keys\n",
                regs[r], g->len >> 20, g->mesh1 - g->mesh0, ntk);
     }
+
+    /* strip coplanar duplicates before anything downstream sees the scene */
+    world_dedup(w);
 
     /* per-mesh XY bounds — the draw cull and the ground grid both key off it */
     int nm = w->scene.count;

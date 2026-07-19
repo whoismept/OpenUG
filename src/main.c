@@ -35,7 +35,7 @@
  * normal build behaves exactly as before; `make debug` adds an ImGui panel. */
 DbgState g_dbg = {
     .freecam = 0, .speed = 0.6f,
-    .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.72f,
+    .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.76f,
     .wheel_z = -0.05f, .wheel_scale = 0.9f,
     .insp_sel = -1,
     .neon_on = 1, .neon_col = { 0.15f, 0.45f, 1.0f }, .neon_str = 0.85f,
@@ -60,14 +60,20 @@ DbgState g_dbg = {
  * used. Frees any previously uploaded rim. Returns 1 on success. */
 /* Drop triangles that weld two submesh runs together.
  *
- * The wheel archives carry a 0x134B02 table per object, but every texkey in
- * them resolves to 0, so the shared walker's split (which only fires when the
- * records use DIFFERENT textures) never triggers and the whole index buffer is
- * regrouped in 3s from offset 0. Where a run boundary does not land on a
- * multiple of 3 the tail of one run bridges into the head of the next, making
- * a triangle that spans the entire rim. Measured: exactly 2 of 487 on BBS
- * style 1, first at triangle 365; the other 485 are clean (mean edge 0.065 vs
- * 0.81 diameter).
+ * The wheel archives carry a 0x134B02 table per object, and every submesh of a
+ * given rim style resolves to the SAME texkey (measured across BBS/ENKEI/VOLK/
+ * OZ/LEXANI/WORK/ADVAN). So the shared walker's split -- which only fires when
+ * the records use DIFFERENT textures -- never triggers, and the whole index
+ * buffer is regrouped in 3s from offset 0. Where a run boundary does not land
+ * on a multiple of 3 the tail of one run bridges into the head of the next,
+ * making a triangle that spans the entire rim. Measured: exactly 2 of 487 on
+ * BBS style 1, first at triangle 365; the other 485 are clean (mean edge 0.065
+ * vs 0.81 diameter).
+ *
+ * NB: an earlier version of this comment blamed "every texkey resolves to 0".
+ * That was a symptom of a 64-entry cap on the key table (TEXTURES.BIN has 274
+ * slots), fixed at the wkeys[] declaration. Keys resolve now; the weld remains,
+ * because the real cause is one-texture-per-rim, not a missing texture.
  *
  * Sanitized here rather than in n2_add_pair on purpose: that path is shared by
  * all 57 cars, and this archive is the only place the condition is known to
@@ -98,7 +104,9 @@ static void rim_drop_welded_tris(N2Scene *s) {
 
 static int load_rim_style(const unsigned char *wldata, long wllen,
                           const uint32_t *wkeys, int nwkeys, int style,
-                          N2Scene *lib, GpuMesh **gm, int *ngm) {
+                          N2Scene *lib, GpuMesh **gm, int *ngm,
+                          const unsigned char *wtdata, long wtlen,
+                          GLuint *rimtex) {
     if (!wldata) { (void)wllen; return 0; }
     for (int i = 0; i < *ngm; i++) {
         glDeleteBuffers(1, &(*gm)[i].vbo);
@@ -112,6 +120,26 @@ static int load_rim_style(const unsigned char *wldata, long wllen,
     if (n <= 0) return 0;
     rim_drop_welded_tris(lib);
     *gm = upload_scene(lib); *ngm = n;
+
+    /* Bind the rim's own diffuse out of WHEELS/TEXTURES.BIN. Every submesh of
+       a given style carries the SAME key (measured across BBS/ENKEI/VOLK/OZ/
+       LEXANI/WORK/ADVAN), so one texture covers the whole rim -- hence a
+       single GLuint rather than a per-mesh map like the car body uses. */
+    if (*rimtex) { glDeleteTextures(1, rimtex); *rimtex = 0; }
+    uint32_t tk = lib->count ? lib->meshes[0].texkey : 0;
+    N2Tex rt; memset(&rt, 0, sizeof rt);
+    if (tk && wtdata && n2_load_car_tex_by_key(wtdata, wtlen, tk, &rt)) {
+        *rimtex = upload_tex(&rt);
+        /* rim sheets are atlases with UVs in [0,1]: clamp so REPEAT wrap +
+           mip filtering cannot bleed the opposite border in (same reason as
+           the car body atlases above). */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        free(rt.rgb); free(rt.alpha);
+    }
+    printf("  rim diffuse: texkey %08x -> %s (%dx%d)\n", tk,
+           *rimtex ? "bound" : "UNRESOLVED, procedural fallback",
+           *rimtex ? rt.w : 0, *rimtex ? rt.h : 0);
     return 1;
 }
 
@@ -461,14 +489,25 @@ int main(int argc, char **argv) {
                  dataroot, wheel_brands[wheel_brand]);
         wldata = n2_read_file(wlp, &wllen);
     }
-    uint32_t wkeys[64]; int nwkeys = 0;
-    {   char wtp[1024]; long wtlen = 0;
+    /* WHEELS/TEXTURES.BIN holds 274 texture slots (measured). This array used
+       to be 64 entries, which silently truncated the table at slot 63: only a
+       rim whose diffuse key happened to land in that first 64 ever resolved
+       (LEXANI did, by luck), and every other brand fell back to flat colour.
+       Sized well clear of 274 so a larger table still fits; n2_car_tex_keys
+       stops at maxk, so an undersized array fails quietly rather than loudly. */
+    uint32_t wkeys[512]; int nwkeys = 0;
+    long wtlen = 0; unsigned char *wtdata = NULL;   /* kept resident: the rim
+                       diffuse is decoded out of it on every style/brand swap */
+    {   char wtp[1024];
         snprintf(wtp, sizeof wtp, "%s/CARS/WHEELS/TEXTURES.BIN", dataroot);
-        unsigned char *wt = n2_read_file(wtp, &wtlen);
-        if (wt) { nwkeys = n2_car_tex_keys(wt, wtlen, wkeys, 64); free(wt); }
+        wtdata = n2_read_file(wtp, &wtlen);
+        if (wtdata) nwkeys = n2_car_tex_keys(wtdata, wtlen, wkeys,
+                                             (int)(sizeof wkeys / sizeof wkeys[0]));
     }
+    GLuint rimtex = 0;    /* real rim diffuse; 0 => fall back to procedural */
     if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
-                       &wheellib, &wheelgm, &nwheelgm))
+                       &wheellib, &wheelgm, &nwheelgm,
+                       wtdata, wtlen, &rimtex))
         printf("rims: BBS style %d, %d mesh(es)\n", wheel_style, nwheelgm);
     else
         printf("rims: library unavailable, using procedural wheels\n");
@@ -568,7 +607,8 @@ int main(int argc, char **argv) {
                 else if (k == SDLK_w && wldata) {
                     wheel_style = wheel_style % 8 + 1;   /* 1..8 */
                     if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
-                                       &wheellib, &wheelgm, &nwheelgm))
+                                       &wheellib, &wheelgm, &nwheelgm,
+                                       wtdata, wtlen, &rimtex))
                         printf("rims -> BBS style %d (%d mesh(es))\n", wheel_style, nwheelgm);
                 }
                 else if (k == SDLK_k && cdata) {
@@ -1164,11 +1204,14 @@ int main(int argc, char **argv) {
                 glUniform1f(uUseTex, 1.0f);
                 /* PHYS_KMH(speed), not g_dbg.kmh: that mirror is only written
                    at the end of the frame, so reading it here lags a frame.
-                   The library rims carry no resolvable diffuse key of their
-                   own, so they reuse the procedural rim sheet -- which also
-                   keeps the speed blur working on them. */
+                   Below the blur threshold the geometric rim is drawn, so it
+                   gets its own diffuse out of WHEELS/TEXTURES.BIN (rimtex).
+                   Above it the mesh is swapped for the procedural disc, whose
+                   angular-averaged sheet is what sells the blur -- so the
+                   texture has to follow the mesh swap, not the other way. */
                 glBindTexture(GL_TEXTURE_2D,
-                              PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur : texWheel);
+                              PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur :
+                              (nwheelgm > 0 && rimtex) ? rimtex : texWheel);
                 for (int k=0;k<4;k++){ float MVPw[16]; mat_mul(MVPc, wheelT[k], MVPw);
                     glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw);
                     /* Real aftermarket rim on the same steering/rolling
@@ -1557,7 +1600,8 @@ int main(int argc, char **argv) {
             }
             wheel_style = g_dbg.wheel_style < 1 ? 1 : g_dbg.wheel_style;
             if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
-                               &wheellib, &wheelgm, &nwheelgm))
+                               &wheellib, &wheelgm, &nwheelgm,
+                               wtdata, wtlen, &rimtex))
                 printf("rims -> %s style %d (%d mesh(es))\n",
                        wheel_brands[wheel_brand], wheel_style, nwheelgm);
         }
