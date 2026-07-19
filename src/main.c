@@ -1062,11 +1062,21 @@ int main(int argc, char **argv) {
                 }
                 if (insp_on && g_dbg.insp_wire)
                     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                if (insp_on && g_dbg.insp_flipn) glUniform1f(rp.uFlipN, 1.0f);
+                if (insp_on && g_dbg.insp_cull) {
+                    /* culling is OFF engine-wide, so glFrontFace alone would be
+                       inert; enable it here so winding actually has an effect
+                       and the inversion question becomes testable. */
+                    glEnable(GL_CULL_FACE);
+                    glCullFace(g_dbg.insp_cull == 1 ? GL_BACK : GL_FRONT);
+                }
 #endif
                 if (c != N2_CAR_TIRE) { draw_gpumesh(&cgm[i]); g_dbg.drawn++; }   /* tyres = procedural, below */
 #ifdef DEBUG_UI
                 if (insp_on && g_dbg.insp_wire) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                 if (insp_on && g_dbg.insp_highlight) glUniform1f(uUnlit, 0.0f);
+                if (insp_on && g_dbg.insp_flipn) glUniform1f(rp.uFlipN, 0.0f);
+                if (insp_on && g_dbg.insp_cull) glDisable(GL_CULL_FACE);
 #endif
             }
             /* glass pass: translucent tint, blended over the finished body,

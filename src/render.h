@@ -58,6 +58,7 @@ typedef struct {
           uUVCheck, /* 1 = show the diagnostic UV-coordinate visualization
                        instead of lighting/texture (toggle lives in the
                        ImGui Session panel, make debug only) */
+          uFlipN,   /* 1 = negate the vertex normal (inspector diagnostic) */
           uGloss;   /* specular pow() exponent: high = tight metallic-paint
                        highlight, low = broad plastic/trim sheen (cars only) */
 } RProg;

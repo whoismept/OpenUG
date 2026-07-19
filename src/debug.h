@@ -69,6 +69,8 @@ typedef struct {
     int  insp_highlight;    /* 1 = force the selection to a neon unlit overlay */
     int  insp_wire;         /* 1 = draw the selection as wireframe */
     int  insp_dump;         /* panel raises, main.c dumps telemetry and clears */
+    int  insp_flipn;        /* 1 = negate normals on the selected mesh (uFlipN) */
+    int  insp_cull;         /* 0 = no culling (engine default), 1 = cull back, 2 = cull front */
 
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */

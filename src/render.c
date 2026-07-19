@@ -33,7 +33,7 @@ static const char *FS =
     "uniform float uAmbient; uniform float uDiffuse; uniform vec3 uLight;\n"
     "uniform vec3 uFogColor; uniform float uFogDensity;\n"
     "uniform vec3 uCamPos; uniform float uEnv; uniform float uUVCheck;\n"
-    "uniform float uGloss;\n"
+    "uniform float uGloss; uniform float uFlipN;\n"
     /* exp^2 distance fog: fades far batches into the sky colour (which is
        cleared to uFogColor, so the horizon and the haze always agree) */
     "void main(){\n"
@@ -56,6 +56,7 @@ static const char *FS =
        model-space (no per-vertex transform), so a rotated object (the car)
        must counter-rotate the light or its lit side turns with it. */
     "  vec3 L=normalize(uLight); vec3 N=normalize(vN);\n"
+    "  if(uFlipN>0.5) N = -N;\n"
     "  vec3 V=normalize(uCamPos - vPos);\n"
     "  float nl=max(dot(N,L),0.0);\n"
     "  float d=uAmbient+uDiffuse*nl;\n"   /* directional; reveals body form */
@@ -198,12 +199,14 @@ RProg render_program(void) {
     r.uDiffuse = glGetUniformLocation(r.prog, "uDiffuse");
     r.uLight   = glGetUniformLocation(r.prog, "uLight");
     r.uGloss   = glGetUniformLocation(r.prog, "uGloss");
+    r.uFlipN   = glGetUniformLocation(r.prog, "uFlipN");
     glUniform1f(r.uAlpha, 1.0f); glUniform1f(r.uSoft, 0.0f); glUniform1f(r.uSpec, 0.0f);
     glUniform1f(r.uDecal, 0.0f);
     glUniform3f(r.uFogColor, 0.06f, 0.07f, 0.11f); glUniform1f(r.uFogDensity, 0.0f);
     glUniform3f(r.uCamPos, 0, 0, 0); glUniform1f(r.uEnv, 0.0f);
     glUniform1f(r.uUVCheck, 0.0f);
     glUniform1f(r.uGloss, 20.0f);
+    glUniform1f(r.uFlipN, 0.0f);
     glUniform3f(r.uLight, N2_SUN_X, N2_SUN_Y, N2_SUN_Z);
     return r;
 }
