@@ -129,6 +129,26 @@ extern "C" void dbgui_frame(void) {
     } else ImGui::TextDisabled("wheel library not loaded");
     ImGui::Separator();
     ImGui::TextDisabled("body kit: K cycles KIT00/01/02 (see console)");
+
+    if (ImGui::CollapsingHeader("Mesh Inspector", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static const char *catn[] = {"ROAD","TERRAIN","OTHER","SKY","GLOW","?","?","?","?","?",
+                                     "BODY","GLASS","LIGHT","TIRE","MISC","BRAKELIGHT","MECH"};
+        ImGui::Checkbox("highlight", &(bool &)*(bool *)&g_dbg.insp_highlight);
+        ImGui::SameLine();
+        ImGui::Checkbox("wireframe", &(bool &)*(bool *)&g_dbg.insp_wire);
+        if (ImGui::Button("Dump Selected Mesh Telemetry")) g_dbg.insp_dump = 1;
+        ImGui::BeginChild("meshlist", ImVec2(0, 180), true);
+        for (int i = 0; i < g_dbg.insp_count; i++) {
+            int c = (g_dbg.insp_cat && i < g_dbg.insp_count) ? g_dbg.insp_cat[i] : 0;
+            const char *cn = (c >= 0 && c <= 16) ? catn[c] : "?";
+            char lbl[96];
+            snprintf(lbl, sizeof lbl, "%3d  %-10s %5d v", i, cn,
+                     g_dbg.insp_verts ? g_dbg.insp_verts[i] : 0);
+            if (ImGui::Selectable(lbl, g_dbg.insp_sel == i)) g_dbg.insp_sel = i;
+        }
+        ImGui::EndChild();
+        if (ImGui::Button("clear selection")) g_dbg.insp_sel = -1;
+    }
     ImGui::End();
 }
 

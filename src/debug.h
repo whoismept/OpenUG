@@ -61,6 +61,15 @@ typedef struct {
     int  wheel_style;                /* STYLEnn within that brand */
     int  wheel_reload;               /* panel sets 1 => main.c re-streams rims */
 
+    /* --- Mesh Inspector (passive: observes/overlays, never alters assets) --- */
+    int  insp_count;        /* how many car meshes are inspectable */
+    const int *insp_cat;    /* N2_CAR_* per mesh (main.c owns the array) */
+    const int *insp_verts;  /* vertex count per mesh */
+    int  insp_sel;          /* selected mesh index, -1 = none */
+    int  insp_highlight;    /* 1 = force the selection to a neon unlit overlay */
+    int  insp_wire;         /* 1 = draw the selection as wireframe */
+    int  insp_dump;         /* panel raises, main.c dumps telemetry and clears */
+
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */
 } DbgState;

@@ -37,6 +37,7 @@ DbgState g_dbg = {
     .freecam = 0, .speed = 0.6f,
     .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.85f,
     .wheel_z = -0.05f, .wheel_scale = 0.9f,
+    .insp_sel = -1,
     .ambient = 0.38f, .diffuse = 0.62f, .body_spec = 0.34f,   /* glossy paint */
     /* f(700m cull range) ~= 0.07 — far batches dissolve into the sky */
     .fog_density = 0.0023f, .fog_r = 0.06f, .fog_g = 0.07f, .fog_b = 0.11f,
@@ -1049,7 +1050,24 @@ int main(int argc, char **argv) {
                     else if (c == N2_CAR_MECH)       glUniform3f(uColor, 0.05f, 0.05f, 0.05f);  /* unpainted metal/plastic */
                     else                              glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
                 }
+#ifdef DEBUG_UI
+                /* Mesh Inspector overlay: purely a draw-state override on the
+                   selected mesh -- no asset, parser or transform is touched. */
+                int insp_on = (g_dbg.insp_sel == i);
+                if (insp_on && g_dbg.insp_highlight) {
+                    glUniform1f(uUseTex, 0.0f); glUniform1f(rp.uDecal, 0.0f);
+                    glUniform1f(uSpec, 0.0f); glUniform1f(rp.uEnv, 0.0f);
+                    glUniform1f(uUnlit, 1.0f);
+                    glUniform3f(uColor, 1.0f, 0.08f, 0.85f);   /* neon magenta */
+                }
+                if (insp_on && g_dbg.insp_wire)
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+#endif
                 if (c != N2_CAR_TIRE) { draw_gpumesh(&cgm[i]); g_dbg.drawn++; }   /* tyres = procedural, below */
+#ifdef DEBUG_UI
+                if (insp_on && g_dbg.insp_wire) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                if (insp_on && g_dbg.insp_highlight) glUniform1f(uUnlit, 0.0f);
+#endif
             }
             /* glass pass: translucent tint, blended over the finished body,
                depth-write off (no self-occlusion), spec kept by the shader's
@@ -1409,6 +1427,11 @@ int main(int argc, char **argv) {
         g_dbg.sel_car=selcar; g_dbg.n_cars=ncars;
         g_dbg.sel_track=seltrack; g_dbg.n_tracks=ntrack;
         g_dbg.sel_circuit=selcirc; g_dbg.n_circuits=ncirc;
+        {   static int icat[512], ivts[512];
+            int ni = ncar < 512 ? ncar : 512;
+            for (int i = 0; i < ni; i++) { icat[i]=cgm[i].cat; ivts[i]=car.meshes[i].nverts; }
+            g_dbg.insp_count = ni; g_dbg.insp_cat = icat; g_dbg.insp_verts = ivts;
+        }
         g_dbg.wheel_brands = wheel_brands;
         g_dbg.wheel_brand_n = n_wheel_brands;
         if (g_dbg.wheel_style < 1) g_dbg.wheel_style = wheel_style;
@@ -1422,6 +1445,34 @@ int main(int argc, char **argv) {
            pieces of long-lived world/car state, and building one blind
            (no way to interactively test repeated swaps right now) risks
            a leak or dangling handle that a single screenshot can't catch. */
+        if (g_dbg.insp_dump) {
+            g_dbg.insp_dump = 0;
+            int i = g_dbg.insp_sel;
+            if (i >= 0 && i < ncar) {
+                float bb[6]; n2_mesh_bbox(&car.meshes[i], bb);
+                printf("\n[inspector] car mesh %d  cat=%d  verts=%d  tris=%d\n",
+                       i, cgm[i].cat, car.meshes[i].nverts, car.meshes[i].nidx/3);
+                printf("  local bbox  x[%.4f,%.4f] y[%.4f,%.4f] z[%.4f,%.4f]\n",
+                       bb[0],bb[1],bb[2],bb[3],bb[4],bb[5]);
+                printf("  car world pos (%.2f,%.2f,%.2f) heading %.3f rad  %.1f km/h\n",
+                       carpos[0],carpos[1],carpos[2], heading, PHYS_KMH(speed));
+                printf("  wheel scale %.3f  z-offset %.3f  front %.2f rear %.2f track %.2f\n",
+                       g_dbg.wheel_scale, g_dbg.wheel_z, g_dbg.wheel_frontf,
+                       g_dbg.wheel_rearf, g_dbg.wheel_trackf);
+                for (int w = 0; w < 4; w++) {
+                    printf("  wheelT[%d] (column-major):\n", w);
+                    for (int r = 0; r < 4; r++)
+                        printf("    % .4f % .4f % .4f % .4f\n",
+                               wheelT[w][r*4+0], wheelT[w][r*4+1],
+                               wheelT[w][r*4+2], wheelT[w][r*4+3]);
+                }
+                if (nwheelgm > 0) {
+                    float rb[6]; n2_mesh_bbox(&wheellib.meshes[0], rb);
+                    printf("  active rim: %d meshes, mesh0 %d verts, bbox x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f]\n",
+                           nwheelgm, wheellib.meshes[0].nverts, rb[0],rb[1],rb[2],rb[3],rb[4],rb[5]);
+                }
+            } else printf("[inspector] no mesh selected\n");
+        }
         if (g_dbg.wheel_reload) {          /* panel picked a brand/style */
             g_dbg.wheel_reload = 0;
             if (g_dbg.wheel_brand >= 0 && g_dbg.wheel_brand < n_wheel_brands &&
