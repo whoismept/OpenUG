@@ -95,8 +95,13 @@ static const char *FS =
     "  if(uEnv>0.001){\n"
     "    vec3 R = reflect(-V, N);\n"
     "    float up = clamp(R.z*0.5+0.5, 0.0, 1.0);\n"
-    "    vec3 env = mix(vec3(0.02,0.02,0.03), vec3(0.05,0.06,0.11), up)\n"
-    "             + vec3(0.45,0.38,0.26)*pow(1.0-abs(R.z), 8.0);\n"
+    /* stronger, wider night-city sphere: brighter sky dome and a much broader
+       warm horizon band (pow 8 -> 4). The old values topped out at 0.11, so
+       even at uEnv 0.5 the reflection never rose above the paint and the body
+       read as plastic. This gives the clear-coat something bright enough to
+       actually mirror. */
+    "    vec3 env = mix(vec3(0.03,0.03,0.05), vec3(0.10,0.14,0.24), up)\n"
+    "             + vec3(0.85,0.66,0.42)*pow(1.0-abs(R.z), 4.0);\n"
     "    float fres = 0.35 + 0.65*pow(1.0-clamp(dot(N,V),0.0,1.0), 3.0);\n"
     "    lit += env * (uEnv * fres);\n"
     "  }\n"
