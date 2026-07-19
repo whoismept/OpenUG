@@ -113,6 +113,23 @@ extern "C" void dbgui_frame(void) {
         ImGui::ColorEdit3("paint", g_dbg.paint);
     }
     ImGui::End();
+
+    /* ---- Car Modification Setup: live wheel brand/style swapping ---- */
+    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Car Modification Setup");
+    if (g_dbg.wheel_brands && g_dbg.wheel_brand_n > 0) {
+        static const char *brands[32];
+        int nb = g_dbg.wheel_brand_n < 32 ? g_dbg.wheel_brand_n : 32;
+        for (int i = 0; i < nb; i++) brands[i] = g_dbg.wheel_brands[i];
+        if (ImGui::Combo("wheel brand", &g_dbg.wheel_brand, brands, nb))
+            g_dbg.wheel_reload = 1;
+        if (ImGui::SliderInt("wheel style", &g_dbg.wheel_style, 1, 8))
+            g_dbg.wheel_reload = 1;
+        ImGui::TextDisabled("re-streams GEOMETRY_<BRAND>.BIN and rebuilds the rim VBO/IBO");
+    } else ImGui::TextDisabled("wheel library not loaded");
+    ImGui::Separator();
+    ImGui::TextDisabled("body kit: K cycles KIT00/01/02 (see console)");
+    ImGui::End();
 }
 
 extern "C" void dbgui_render(void) {

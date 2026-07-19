@@ -54,6 +54,13 @@ typedef struct {
     const char (*track_list)[64];
     int  want_car, want_track;
 
+    /* --- car modification (wheel library); panel writes, main.c acts --- */
+    const char (*wheel_brands)[24];  /* brand name table owned by main.c */
+    int  wheel_brand_n;              /* entries in it */
+    int  wheel_brand;                /* selected index */
+    int  wheel_style;                /* STYLEnn within that brand */
+    int  wheel_reload;               /* panel sets 1 => main.c re-streams rims */
+
     /* --- diagnostics --- */
     int  show_uv_checker;   /* fed to the shader's uUVCheck uniform each frame */
 } DbgState;

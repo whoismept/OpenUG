@@ -97,7 +97,7 @@ static void rim_drop_welded_tris(N2Scene *s) {
 static int load_rim_style(const unsigned char *wldata, long wllen,
                           const uint32_t *wkeys, int nwkeys, int style,
                           N2Scene *lib, GpuMesh **gm, int *ngm) {
-    if (!wldata) return 0;
+    if (!wldata) { (void)wllen; return 0; }
     for (int i = 0; i < *ngm; i++) {
         glDeleteBuffers(1, &(*gm)[i].vbo);
         glDeleteBuffers(1, &(*gm)[i].nbo);
@@ -444,11 +444,19 @@ int main(int argc, char **argv) {
        ordinary car walker reads it. Each brand file holds its styles under
        STYLEnn tokens, which is the SAME token hoods use inside a car, so the
        style selector here is wheel_style_id rather than hood_style. */
+    static const char wheel_brands[][24] = {
+        "BBS","ENKEI","VOLK","OZ","MOMO","ADVAN","AVUS","KONIG",
+        "LOWENHART","RACINGHART","ROTA","WORK","5ZIGEN","LEXANI"
+    };
+    const int n_wheel_brands = (int)(sizeof wheel_brands / sizeof wheel_brands[0]);
+    (void)n_wheel_brands;   /* only read by the ImGui panel (debug builds) */
     N2Scene wheellib; memset(&wheellib, 0, sizeof wheellib);
     GpuMesh *wheelgm = NULL; int nwheelgm = 0, wheel_style = 1;
     long wllen = 0; unsigned char *wldata = NULL;
+    int wheel_brand = 0;
     {   char wlp[1024];
-        snprintf(wlp, sizeof wlp, "%s/CARS/WHEELS/GEOMETRY_BBS.BIN", dataroot);
+        snprintf(wlp, sizeof wlp, "%s/CARS/WHEELS/GEOMETRY_%s.BIN",
+                 dataroot, wheel_brands[wheel_brand]);
         wldata = n2_read_file(wlp, &wllen);
     }
     uint32_t wkeys[64]; int nwkeys = 0;
@@ -1073,11 +1081,17 @@ int main(int argc, char **argv) {
                               PHYS_KMH(speed) > WHEEL_BLUR_KMH ? texWheelBlur : texWheel);
                 for (int k=0;k<4;k++){ float MVPw[16]; mat_mul(MVPc, wheelT[k], MVPw);
                     glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPw);
-                    /* real aftermarket rim, on the same steering/rolling
-                       matrices; falls back to the procedural wheel if the
-                       library is missing. */
-                    if (nwheelgm > 0) draw_gpumesh(&wheelgm[0]);
-                    else              draw_gpumesh(&wheelmesh); }
+                    /* Real aftermarket rim on the same steering/rolling
+                       matrices. Above the blur threshold the spokes are real
+                       GEOMETRY, so swapping the texture (Phase 29) can no
+                       longer hide them -- at speed they alias into a strobe.
+                       So swap the whole mesh: geometric rim when slow enough
+                       to read the spokes, procedural disc (already carrying
+                       the angular-averaged texture) once it is spinning. */
+                    if (nwheelgm > 0 && PHYS_KMH(speed) <= WHEEL_BLUR_KMH)
+                        draw_gpumesh(&wheelgm[0]);
+                    else
+                        draw_gpumesh(&wheelmesh); }
                 g_dbg.drawn += 4;
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MVPc);
             }
@@ -1395,6 +1409,9 @@ int main(int argc, char **argv) {
         g_dbg.sel_car=selcar; g_dbg.n_cars=ncars;
         g_dbg.sel_track=seltrack; g_dbg.n_tracks=ntrack;
         g_dbg.sel_circuit=selcirc; g_dbg.n_circuits=ncirc;
+        g_dbg.wheel_brands = wheel_brands;
+        g_dbg.wheel_brand_n = n_wheel_brands;
+        if (g_dbg.wheel_style < 1) g_dbg.wheel_style = wheel_style;
         g_dbg.car_list = (const char (*)[64])carlist;
         g_dbg.track_list = (const char (*)[64])tracklist;
         dbgui_frame();
@@ -1405,6 +1422,22 @@ int main(int argc, char **argv) {
            pieces of long-lived world/car state, and building one blind
            (no way to interactively test repeated swaps right now) risks
            a leak or dangling handle that a single screenshot can't catch. */
+        if (g_dbg.wheel_reload) {          /* panel picked a brand/style */
+            g_dbg.wheel_reload = 0;
+            if (g_dbg.wheel_brand >= 0 && g_dbg.wheel_brand < n_wheel_brands &&
+                g_dbg.wheel_brand != wheel_brand) {
+                char wlp[1024];
+                snprintf(wlp, sizeof wlp, "%s/CARS/WHEELS/GEOMETRY_%s.BIN",
+                         dataroot, wheel_brands[g_dbg.wheel_brand]);
+                unsigned char *nd = n2_read_file(wlp, &wllen);
+                if (nd) { free(wldata); wldata = nd; wheel_brand = g_dbg.wheel_brand; }
+            }
+            wheel_style = g_dbg.wheel_style < 1 ? 1 : g_dbg.wheel_style;
+            if (load_rim_style(wldata, wllen, wkeys, nwkeys, wheel_style,
+                               &wheellib, &wheelgm, &nwheelgm))
+                printf("rims -> %s style %d (%d mesh(es))\n",
+                       wheel_brands[wheel_brand], wheel_style, nwheelgm);
+        }
         if (g_dbg.want_car >= 0 && g_dbg.want_car < ncars)
             relaunch(selfexe, dataroot, carlist[g_dbg.want_car], trackname);
         if (g_dbg.want_track >= 0 && g_dbg.want_track < ntrack)
