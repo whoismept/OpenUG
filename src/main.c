@@ -35,11 +35,11 @@
  * normal build behaves exactly as before; `make debug` adds an ImGui panel. */
 DbgState g_dbg = {
     .freecam = 0, .speed = 0.6f,
-    .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.85f,
+    .wheel_frontf = 0.62f, .wheel_rearf = 0.58f, .wheel_trackf = 0.72f,
     .wheel_z = -0.05f, .wheel_scale = 0.9f,
     .insp_sel = -1,
     .neon_on = 1, .neon_col = { 0.15f, 0.45f, 1.0f }, .neon_str = 0.85f,
-    .ambient = 0.38f, .diffuse = 0.62f, .body_spec = 0.34f,   /* glossy paint */
+    .ambient = 0.38f, .diffuse = 0.62f, .body_spec = 0.50f,   /* glossy paint */
     /* f(700m cull range) ~= 0.07 — far batches dissolve into the sky */
     .fog_density = 0.0023f, .fog_r = 0.06f, .fog_g = 0.07f, .fog_b = 0.11f,
     .paint_override = 0, .paint = { 0.68f, 0.09f, 0.08f },
@@ -1029,7 +1029,7 @@ int main(int argc, char **argv) {
                    body-paint gloss or reflection either. Soft-top canvas
                    doesn't reflect the environment like painted metal either. */
                 glUniform1f(rp.uEnv, cgm[i].roof ? 0.02f
-                                   : (c==N2_CAR_BODY||c==N2_CAR_MISC)?0.35f
+                                   : (c==N2_CAR_BODY||c==N2_CAR_MISC)?0.50f
                                    : is_light?0.55f : c==N2_CAR_MECH?0.0f : 0.15f);
                 glUniform1f(rp.uDecal, 0.0f);   /* body branch may re-enable */
                 GLuint tex = 0; int hasalpha = 0;

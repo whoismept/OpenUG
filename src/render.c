@@ -81,7 +81,11 @@ static const char *FS =
     "    float edge=pow(1.0-clamp(dot(N,V),0.0,1.0), 4.0);\n"
     "    base *= mix(1.0, 0.6, edge);\n"
     "  }\n"
-    "  float sp = pow(max(dot(N,L),0.0), uGloss)*uSpec;\n"     /* glossy sheen (car paint) */
+    /* Phong: reflect the light about the normal and test it against the VIEW
+       vector. The old form used dot(N,L) with no V term at all, so it was a
+       sharpened diffuse -- the highlight could not travel across a panel as
+       the camera moved, which is what made the paint read flat/matte. */
+    "  float sp = pow(max(dot(reflect(-L,N), V), 0.0), uGloss)*uSpec;\n"
     "  float rim = pow(1.0-abs(N.z), 3.0)*uSpec*0.4;\n"        /* fresnel-ish edge sheen */
     "  vec3 lit = base*d*1.35 + sp + rim;\n"
     /* environment reflection (cars only, uEnv>0): a procedural night-city
