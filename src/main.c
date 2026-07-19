@@ -852,8 +852,14 @@ int main(int argc, char **argv) {
             glUniform3f(uColor, 0.0f, 0.0f, 0.0f); glUniform1f(uAlpha, 0.5f);
             for (int c=0; c<=nai; c++) {
                 float *cp = c==0 ? carpos : ais[c-1].pos;
-                float gz2 = world_ground_z(&scene, cp[0], cp[1], cp[2]) + 0.03f, sz=3.2f;
-                float M[16]={sz,0,0,0, 0,sz,0,0, 0,0,1,0, cp[0]-sz*0.5f, cp[1]-sz*0.5f, gz2, 1};
+                float gz2 = world_ground_z(&scene, cp[0], cp[1], cp[2]) + 0.03f;
+                /* footprint from the loaded body AABB rather than a fixed
+                   square, so a Miata and a Hummer do not cast the same blob.
+                   Falls back to the old 3.2 if no car geometry is loaded. */
+                float sl = carbb[3]-carbb[0], sw = carbb[4]-carbb[1];
+                float sx = sl > 0.5f ? sl*1.10f : 3.2f;
+                float sy = sw > 0.5f ? sw*1.35f : 3.2f;
+                float M[16]={sx,0,0,0, 0,sy,0,0, 0,0,1,0, cp[0]-sx*0.5f, cp[1]-sy*0.5f, gz2, 1};
                 float MV[16]; mat_mul(MVP,M,MV);
                 glUniformMatrix4fv(uMVP,1,GL_FALSE,MV); draw_gpumesh(&quad);
                 g_dbg.drawn++;
@@ -1045,7 +1051,13 @@ int main(int argc, char **argv) {
                 } else {
                     glUniform1f(uUseTex, 0.0f);
                     if      (c == N2_CAR_LIGHT)      glUniform3f(uColor, 0.92f, 0.90f, 0.85f);  /* clear/chrome lens */
-                    else if (c == N2_CAR_BRAKELIGHT) glUniform3f(uColor, 0.60f, 0.02f, 0.02f);  /* rich red lens */
+                    else if (c == N2_CAR_BRAKELIGHT) {
+                        /* lens glows hot while braking (S) and the car is still
+                           rolling forward; otherwise it sits at its unlit red. */
+                        int braking = (throttle < -0.1f && speed > 0.01f);
+                        if (braking) glUniform3f(uColor, 1.0f, 0.16f, 0.10f);
+                        else         glUniform3f(uColor, 0.60f, 0.02f, 0.02f);
+                    }
                     else if (c == N2_CAR_TIRE)       glUniform3f(uColor, 0.05f, 0.05f, 0.06f);
                     else if (c == N2_CAR_MECH)       glUniform3f(uColor, 0.05f, 0.05f, 0.05f);  /* unpainted metal/plastic */
                     else                              glUniform3f(uColor, pnt[0], pnt[1], pnt[2]);
