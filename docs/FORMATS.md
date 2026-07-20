@@ -257,6 +257,78 @@ transparent background). The engine synthesizes a dark cut-vinyl look and
 composites the art under the badge atlas across the whole body (body
 panels share one UV layout; most carry no texture key of their own).
 
+## Scripted / dynamic objects (`ZCV_` / `ZCS_`) — companion `L4R*.BUN`
+
+Each district has a small companion bundle (`TRACKS/L4RA.BUN` … `L4RR.BUN`,
+0.1–0.4 MB) alongside its big `STREAM*.BUN`. It holds the **dynamic and
+scripted set-dressing**: `ZCV_` names are moving vehicles (trains, trolleys,
+drawbridges, warehouse doors, traffic semis) and `ZCS_` names are static props
+(barrels, benches, boxes, signs). This is the format of the entity **definition
+table**, decoded from `L4RA.BUN` (Phase 49). *Placement into the world and any
+animation driver are NOT wired yet — see "Open" below.*
+
+### Entity definition table
+
+Container `0x80034020` holds **N named entities** (89 in L4RA). Each entity is a
+**triple** of consecutive chunks in this order:
+
+```
+0x39200  header   (name, hash, type)        0x5c bytes
+0x39201  hull verts (8-corner bounding box)  0x180 bytes (fixed)
+0x39202  hull faces (12 triangles)           0x50 bytes (fixed)
+```
+
+**`0x39200` header** (0x5c body):
+
+| off  | type      | value / meaning                                            |
+|------|-----------|------------------------------------------------------------|
+| 0x00 | u32       | 0                                                          |
+| 0x04 | u32       | 1                                                          |
+| 0x08 | u32       | 8 — class tag, constant across every entity                |
+| 0x0c | u32       | **name hash** (FNV-32 of the name; e.g. DrawBridgeA = `0xca1d510d`) |
+| 0x10 | char[32]  | **name**, NUL-padded (`ZCV_TrainEngineA`, `ZCS_Barrel_A`, …)|
+| 0x30 | u32       | `0x24` — record type / sub-size, constant                  |
+| 0x34 | u8[20]    | zero in this file — reserved / local-transform slot (unused)|
+
+**`0x39201` hull vertices** (always 0x180 = 384 B):
+
+| off  | type        | meaning                                                  |
+|------|-------------|----------------------------------------------------------|
+| 0x00 | u32, u32    | `3, 3` — constant (matrix/row dims)                       |
+| 0x08 | u16, u16    | linked index pair, e.g. DrawBridgeA `(5,13)`; role TBD (grid cell or link id) |
+| 0x0c | u32         | 0                                                        |
+| 0x10 | 8 × 48 B    | **8 OBB corners**; each slot = `vec3 position` + 9 pad floats (0). **Local space** (centred near origin). |
+
+Decoded corner boxes match real proportions: **DrawBridgeA** 20.4 × 37.2 × 2.1,
+**TrainEngineA** 2.7 × 15.25 × 3.4, **TrolleyA** 14.3 × 5.9 × 1.5 (W×L×H units).
+
+**`0x39202` hull faces** (always 0x50 = 80 B):
+
+| off  | type        | meaning                                                  |
+|------|-------------|----------------------------------------------------------|
+| 0x00 | u32, u32    | `0x11111111 0x11111111` — the standard 8-byte `0x11` filler prefix (as everywhere in this format) |
+| 0x08 | u16 × 36    | **36 indices, range 0–7 = 12 triangles** = the 6 faces of the corner box (2 tris/face) |
+
+So a `ZCV_`/`ZCS_` entity is `name + hash + a local box hull`. There is **no
+world position, orientation, or animation channel inside the triple.**
+
+### World placement (partly decoded, next phase)
+
+Placements live in a separate family in the same file, **linked to the entity
+defs by name hash**, not decoded to completion here:
+
+- `0x37090` (45 in L4RA, 168 B each): `0x11` filler, a count, a **name hash**
+  (e.g. `0xb8a18038`), a 3×3 orientation, then **world-scale positions**
+  (e.g. `(-712.0, -873.1, +17.7)`). This is the instance/placement record.
+- `0x34250` (824 B, one per file): looks like the placement grid header —
+  leading `93, 93` (cell dims) and a world origin/extent (`-1949, 1445, …`).
+- `0x8003b601` groups (13, with `b602`–`b608` children) and the `0x39200/1/2`
+  triples are cross-referenced by the same hashes.
+
+**Open:** confirm the `0x37090` field layout (rotation vs. path-node list — a
+train would carry a spline), resolve the `0x39201 +0x08` u16 pair, and map the
+hash → def linkage before writing any runtime entity update loop.
+
 ## The retail executable
 
 `speed2.exe` is packed with **SafeDisc** DRM (section names `stxt774`/`stxt371`,

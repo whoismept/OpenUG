@@ -60,25 +60,31 @@ DbgState g_dbg = {
  * used. Frees any previously uploaded rim. Returns 1 on success. */
 /* Drop triangles that weld two submesh runs together.
  *
- * The wheel archives carry a 0x134B02 table per object, and every submesh of a
- * given rim style resolves to the SAME texkey (measured across BBS/ENKEI/VOLK/
- * OZ/LEXANI/WORK/ADVAN). So the shared walker's split -- which only fires when
- * the records use DIFFERENT textures -- never triggers, and the whole index
- * buffer is regrouped in 3s from offset 0. Where a run boundary does not land
- * on a multiple of 3 the tail of one run bridges into the head of the next,
- * making a triangle that spans the entire rim. Measured: exactly 2 of 487 on
- * BBS style 1, first at triangle 365; the other 485 are clean (mean edge 0.065
- * vs 0.81 diameter).
+ * What these triangles ACTUALLY are (Phase 49, re-measured -- two earlier
+ * versions of this comment were wrong). They are NOT a grouping artifact:
+ *   - The 0x134B02 index runs are clean. Every run's index count is a
+ *     multiple of 3 and the runs are chained (start = prev start + count),
+ *     so grouping the whole buffer in 3s from offset 0 never crosses a run
+ *     boundary. There is no "tail bridges into the next run" bug.
+ *   - The long triangles are genuine source geometry: a flat, axis-aligned
+ *     quad (2 tris, 4 dedicated verts) at CONSTANT Y = 0.18, spanning the
+ *     full rim diameter in X and Z. Verified identical across BBS/ENKEI/VOLK/
+ *     OZ/ADVAN/LEXANI/WORK/RACINGHART/GIOVANNA/NFSU. It is the rim's flat
+ *     backing/hub plane, hidden behind the spokes and occluded by the tyre
+ *     and brake when mounted -- so dropping it is invisible, and keeping it
+ *     would z-fight against the brake disc the engine draws separately.
+ *     Measured: exactly 2 of 487 tris on BBS style 1 (LEXANI has 4 = two
+ *     quads); the rest are clean spoke surface (mean edge 0.065 vs 0.85 diam).
  *
- * NB: an earlier version of this comment blamed "every texkey resolves to 0".
- * That was a symptom of a 64-entry cap on the key table (TEXTURES.BIN has 274
- * slots), fixed at the wkeys[] declaration. Keys resolve now; the weld remains,
- * because the real cause is one-texture-per-rim, not a missing texture.
+ * So the fix is a genuine-geometry cull, not a parser change: a run-boundary
+ * splitter would keep these tris (they sit correctly inside one run), which
+ * is why that approach was NOT taken. Dropping them here, before upload_scene,
+ * means they never reach a VBO -- the VRAM is already optimal.
  *
- * Sanitized here rather than in n2_add_pair on purpose: that path is shared by
- * all 57 cars, and this archive is the only place the condition is known to
- * arise. Purely local, and geometric rather than name-based, so it cannot
- * misfire on a legitimately large triangle in a small mesh. */
+ * Kept out of n2_add_pair on purpose: that path is shared by all 57 cars, and
+ * this archive is the only place the condition arises. Purely local, and
+ * geometric (edge > 0.25*diag) rather than name-based, so it is self-limiting
+ * and cannot misfire on a legitimately large triangle in a small mesh. */
 static void rim_drop_welded_tris(N2Scene *s) {
     for (int i = 0; i < s->count; i++) {
         N2Mesh *m = &s->meshes[i];
