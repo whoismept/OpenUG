@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible OpenUG2 engine problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach or paste original game assets, executable code, private paths, or personal data.
+  - type: input
+    id: revision
+    attributes:
+      label: OpenUG2 revision
+      description: Commit SHA, branch, or release.
+      placeholder: main @ abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Asset parser
+        - World / track loading
+        - Renderer
+        - Car rendering
+        - Physics / collision
+        - AI / race flow
+        - Build / portability
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include command-line options, controls, and a minimal sequence. Redact personal paths.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or screenshots
+      description: Paste only sanitized output. Do not upload game assets.
+  - type: checkboxes
+    id: cleanroom
+    attributes:
+      label: Clean-room and asset check
+      options:
+        - label: I did not attach, paste, or redistribute original game assets or executable code.
+          required: true
