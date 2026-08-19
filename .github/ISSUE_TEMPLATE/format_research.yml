@@ -1,0 +1,60 @@
+name: Format research
+description: Share a measured, clean-room observation about an NFSU2 data format.
+title: "[Format]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report observations, not copied game code. Do not upload game assets or executable/disassembly output.
+  - type: dropdown
+    id: family
+    attributes:
+      label: File family
+      options:
+        - TRACKS / STREAM
+        - TRACKS / ROUTES
+        - CARS / GEOMETRY
+        - CARS / TEXTURES
+        - GLOBAL / ATTRIBUTES
+        - Audio
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Observed finding
+      description: State the concrete layout, behavior, or correction.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Measurement evidence
+      description: Include chunk IDs, offsets, field sizes, endianness, sample count, and expected values. Do not paste asset bytes.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction method
+      description: Give an asset-free script, pseudocode, or procedure another owner of the game can run.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or negative results
+      description: Describe competing interpretations that were tested, if any.
+  - type: textarea
+    id: impact
+    attributes:
+      label: Implementation impact
+      description: Explain which parser, decoder, renderer, or documentation path this affects.
+  - type: checkboxes
+    id: cleanroom
+    attributes:
+      label: Clean-room and asset check
+      options:
+        - label: This report contains independent observations only and no redistributed game assets, executable code, or copied disassembly output.
+          required: true
